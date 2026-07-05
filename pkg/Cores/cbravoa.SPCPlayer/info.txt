@@ -1,0 +1,6 @@
+SPC Player
+
+Plays SNES/Super Famicom .spc music files on the Analogue Pocket using the
+S-SMP (SPC700) and S-DSP implementation from the MiSTer SNES core.
+
+Load a .spc file to start playback.

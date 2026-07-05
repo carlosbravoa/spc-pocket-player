@@ -1,0 +1,290 @@
+--------------------------------------------------------------------------------
+-- spc_apu: standalone SNES APU (SPC700 SMP + S-DSP + 64KB ARAM) with an
+-- SPC-file loader front end.
+--
+-- CLK must be 21.47727 MHz (SNES NTSC master clock); the DSP's internal CEGen
+-- derives the 4.096 MHz APU enable and 32 kHz sample rate from it.
+--
+-- The loader consumes the raw .spc file as a stream of 16-bit little-endian
+-- words at even byte offsets (as produced by data_loader with
+-- OUTPUT_WORD_SIZE=2), routing each region of the file:
+--
+--   0x00000-0x000FF  header: forwarded as IO writes (SMP latches the SPC700
+--                    CPU registers from offsets 0x24/0x26/0x28/0x2A)
+--   0x00100-0x100FF  64KB ARAM image: written into BRAM; the $F0-$FF register
+--                    page is additionally captured for post-load replay
+--   0x10100-0x1017F  DSP registers: forwarded as IO writes at addr-0x10000
+--   0x101C0-0x101FF  extra RAM: written to ARAM $FFC0-$FFFF
+--
+-- After LOAD_DONE the captured $F0-$FF page is replayed as IO writes to
+-- 0x2F0-0x2FE (SMP control/timers/aux state and the DSP address latch),
+-- then the APU reset is released and the SPC700 starts at the loaded PC.
+--------------------------------------------------------------------------------
+library IEEE;
+use IEEE.std_logic_1164.all;
+use IEEE.numeric_std.all;
+
+entity spc_apu is
+	port(
+		CLK         : in std_logic;                      -- 21.47727 MHz
+		RESET_N     : in std_logic;                      -- external reset (active low)
+
+		LOAD_ACTIVE : in std_logic;                      -- high while a .spc is streaming in
+		LOAD_WR     : in std_logic;                      -- 1-cycle strobe per 16-bit word
+		LOAD_ADDR   : in std_logic_vector(17 downto 0);  -- raw .spc byte offset (even)
+		LOAD_DATA   : in std_logic_vector(15 downto 0);  -- little-endian word
+		LOAD_DONE   : in std_logic;                      -- 1-cycle strobe when file complete
+
+		AUDIO_L     : out std_logic_vector(15 downto 0); -- signed PCM, updates at 32 kHz
+		AUDIO_R     : out std_logic_vector(15 downto 0);
+		SND_RDY     : out std_logic;                     -- 1-cycle strobe per sample
+		PLAYING     : out std_logic
+	);
+end spc_apu;
+
+architecture rtl of spc_apu is
+
+	-- APU reset: held low until the load + register-init sequence completes
+	signal APU_RST_N   : std_logic;
+
+	-- SMP <-> DSP handshake
+	signal SMP_CE      : std_logic;
+	signal SMP_EN_R    : std_logic;
+	signal SMP_EN_F    : std_logic;
+	signal SMP_A       : std_logic_vector(15 downto 0);
+	signal SMP_DO      : std_logic_vector(7 downto 0);
+	signal SMP_DI      : std_logic_vector(7 downto 0);
+	signal SMP_WE      : std_logic;
+
+	-- DSP <-> ARAM
+	signal RAM_A       : std_logic_vector(15 downto 0);
+	signal RAM_D       : std_logic_vector(7 downto 0);
+	signal RAM_Q       : std_logic_vector(7 downto 0);
+	signal RAM_CE_N    : std_logic;
+	signal RAM_OE_N    : std_logic;
+	signal RAM_WE_N    : std_logic;
+
+	-- IO (SPC state load) bus shared by SMP and DSP
+	signal IO_ADDR     : std_logic_vector(16 downto 0);
+	signal IO_DAT      : std_logic_vector(15 downto 0);
+	signal IO_WR       : std_logic;
+
+	signal ARAM_WE     : std_logic;
+
+	-- loader-side ARAM write port
+	signal LD_ARAM_A   : std_logic_vector(15 downto 0);
+	signal LD_ARAM_D   : std_logic_vector(7 downto 0);
+	signal LD_ARAM_WR  : std_logic;
+
+	-- captured $F0-$FF register page (8 little-endian words)
+	type PageF0_t is array (0 to 7) of std_logic_vector(15 downto 0);
+	signal PAGEF0      : PageF0_t;
+
+	-- loader FSM
+	type LoadState_t is (LS_IDLE, LS_ARAM_HI, LS_REGSEQ, LS_START, LS_RUN);
+	signal LSTATE      : LoadState_t;
+	signal REG_IDX     : unsigned(3 downto 0);
+	signal SEQ_CNT     : unsigned(3 downto 0);
+
+	signal ADDR_U      : unsigned(17 downto 0);
+
+begin
+
+	ADDR_U <= unsigned(LOAD_ADDR);
+
+	SMP : entity work.SMP
+	port map(
+		CLK        => CLK,
+		RST_N      => APU_RST_N,
+		CE         => SMP_CE,
+		EN_R       => SMP_EN_R,
+		EN_F       => SMP_EN_F,
+		SYSCLKF_CE => '0',
+
+		A          => SMP_A,
+		DI         => SMP_DI,
+		DO         => SMP_DO,
+		WE         => SMP_WE,
+
+		PA         => "00",
+		PARD_N     => '1',
+		PAWR_N     => '1',
+		CPU_DI     => x"00",
+		CPU_DO     => open,
+		CS         => '0',
+		CS_N       => '1',
+
+		SPC_S0     => open,
+
+		IO_ADDR    => IO_ADDR,
+		IO_DAT     => IO_DAT,
+		IO_WR      => IO_WR,
+
+		SS_ADDR    => x"00",
+		SS_WR      => '0',
+		SS_DI      => x"00",
+		SS_DO      => open
+	);
+
+	DSP : entity work.DSP
+	port map(
+		CLK        => CLK,
+		RST_N      => APU_RST_N,
+		ENABLE     => '1',
+		PAL        => '0',
+		FREQ       => '0',
+
+		SMP_EN_F   => SMP_EN_F,
+		SMP_EN_R   => SMP_EN_R,
+		SMP_A      => SMP_A,
+		SMP_DO     => SMP_DO,
+		SMP_DI     => SMP_DI,
+		SMP_WE     => SMP_WE,
+		SMP_CE     => SMP_CE,
+
+		RAM_A      => RAM_A,
+		RAM_D      => RAM_D,
+		RAM_Q      => RAM_Q,
+		RAM_CE_N   => RAM_CE_N,
+		RAM_OE_N   => RAM_OE_N,
+		RAM_WE_N   => RAM_WE_N,
+
+		LRCK       => open,
+		BCK        => open,
+		SDAT       => open,
+
+		IO_ADDR    => IO_ADDR,
+		IO_DAT     => IO_DAT,
+		IO_WR      => IO_WR,
+
+		SS_ADDR    => (others => '0'),
+		SS_REGS_SEL=> '0',
+		SS_WR      => '0',
+		SS_DI      => x"00",
+		SS_DO      => open,
+
+		AUDIO_L    => AUDIO_L,
+		AUDIO_R    => AUDIO_R,
+		SND_RDY    => SND_RDY
+	);
+
+	-- 64KB ARAM: port A serves the DSP (which arbitrates SMP accesses),
+	-- port B belongs to the loader.
+	ARAM_WE <= not RAM_WE_N and not RAM_CE_N;
+
+	ARAM : entity work.dpram generic map(16, 8)
+	port map(
+		clock     => CLK,
+		address_a => RAM_A,
+		data_a    => RAM_D,
+		wren_a    => ARAM_WE,
+		q_a       => RAM_Q,
+
+		address_b => LD_ARAM_A,
+		data_b    => LD_ARAM_D,
+		wren_b    => LD_ARAM_WR,
+		q_b       => open
+	);
+
+	PLAYING <= '1' when LSTATE = LS_RUN else '0';
+
+	process(CLK, RESET_N)
+	begin
+		if RESET_N = '0' then
+			LSTATE     <= LS_IDLE;
+			APU_RST_N  <= '0';
+			IO_WR      <= '0';
+			IO_ADDR    <= (others => '0');
+			IO_DAT     <= (others => '0');
+			LD_ARAM_WR <= '0';
+			REG_IDX    <= (others => '0');
+			SEQ_CNT    <= (others => '0');
+		elsif rising_edge(CLK) then
+			IO_WR      <= '0';
+			LD_ARAM_WR <= '0';
+
+			case LSTATE is
+				when LS_IDLE | LS_RUN =>
+					if LOAD_ACTIVE = '1' then
+						APU_RST_N <= '0';
+					end if;
+
+					if LOAD_WR = '1' then
+						APU_RST_N <= '0';
+						if ADDR_U <= x"000FE" then
+							-- .spc header: SMP latches CPU registers at 0x24-0x2A
+							IO_ADDR <= LOAD_ADDR(16 downto 0);
+							IO_DAT  <= LOAD_DATA;
+							IO_WR   <= '1';
+						elsif ADDR_U <= x"100FF" then
+							-- 64KB ARAM image (file offset - 0x100), low byte now
+							LD_ARAM_A  <= std_logic_vector(resize(ADDR_U - x"100", 16));
+							LD_ARAM_D  <= LOAD_DATA(7 downto 0);
+							LD_ARAM_WR <= '1';
+							LSTATE     <= LS_ARAM_HI;
+							-- capture the $F0-$FF register page for replay
+							if ADDR_U(17 downto 4) = ("00" & x"01F") then
+								PAGEF0(to_integer(ADDR_U(3 downto 1))) <= LOAD_DATA;
+							end if;
+						elsif ADDR_U >= x"10100" and ADDR_U <= x"1017E" then
+							-- DSP register file -> IO 0x100-0x17F
+							IO_ADDR <= std_logic_vector(resize(ADDR_U - x"10000", 17));
+							IO_DAT  <= LOAD_DATA;
+							IO_WR   <= '1';
+						elsif ADDR_U >= x"101C0" and ADDR_U <= x"101FE" then
+							-- extra RAM -> ARAM $FFC0-$FFFF, low byte now
+							LD_ARAM_A  <= std_logic_vector(resize(ADDR_U - x"101C0" + x"FFC0", 16));
+							LD_ARAM_D  <= LOAD_DATA(7 downto 0);
+							LD_ARAM_WR <= '1';
+							LSTATE     <= LS_ARAM_HI;
+						end if;
+					elsif LOAD_DONE = '1' then
+						REG_IDX <= (others => '0');
+						SEQ_CNT <= (others => '0');
+						LSTATE  <= LS_REGSEQ;
+					end if;
+
+				when LS_ARAM_HI =>
+					-- high byte of the word on the following cycle
+					LD_ARAM_A  <= std_logic_vector(unsigned(LD_ARAM_A) + 1);
+					LD_ARAM_D  <= LOAD_DATA(15 downto 8);
+					LD_ARAM_WR <= '1';
+					if LOAD_DONE = '1' then
+						REG_IDX <= (others => '0');
+						SEQ_CNT <= (others => '0');
+						LSTATE  <= LS_REGSEQ;
+					else
+						LSTATE <= LS_IDLE;
+					end if;
+
+				when LS_REGSEQ =>
+					-- replay ARAM $F0-$FF page into IO 0x2F0-0x2FE, one word
+					-- every 8 cycles (the DSP register path needs 2 cycles of
+					-- stable IO_ADDR/IO_DAT after each strobe)
+					SEQ_CNT <= SEQ_CNT + 1;
+					if SEQ_CNT = 0 then
+						IO_ADDR <= std_logic_vector(to_unsigned(16#2F0#, 17) + (resize(REG_IDX, 17) sll 1));
+						IO_DAT  <= PAGEF0(to_integer(REG_IDX(2 downto 0)));
+						IO_WR   <= '1';
+					elsif SEQ_CNT = 7 then
+						if REG_IDX = 7 then
+							SEQ_CNT <= (others => '0');
+							LSTATE  <= LS_START;
+						else
+							REG_IDX <= REG_IDX + 1;
+						end if;
+					end if;
+
+				when LS_START =>
+					-- a few idle cycles with IO_WR low so REG_SET can settle,
+					-- then release the APU
+					SEQ_CNT <= SEQ_CNT + 1;
+					if SEQ_CNT = 15 then
+						APU_RST_N <= '1';
+						LSTATE    <= LS_RUN;
+					end if;
+			end case;
+		end if;
+	end process;
+
+end rtl;

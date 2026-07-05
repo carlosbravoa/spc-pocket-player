@@ -1,0 +1,54 @@
+v 4
+file . "../spc_apu_tb.vhd" "fc1597b09ccb75625533b442ee986187aad017db" "20260705061438.175":
+  entity spc_apu_tb at 11( 575) + 0 on 47;
+  architecture sim of spc_apu_tb at 23( 785) + 0 on 48;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/spc_apu.vhd" "7af3fe68caffbf6ddfdc86fcca4435f6d3c18f63" "20260705061438.175":
+  entity spc_apu at 23( 1277) + 0 on 45;
+  architecture rtl of spc_apu at 45( 2202) + 0 on 46;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/DSP.vhd" "2a74f212ef60a0fd6975ca7d439a29d7c68b3e65" "20260705061438.174":
+  entity dsp at 1( 0) + 0 on 43;
+  architecture rtl of dsp at 53( 1300) + 0 on 44;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SMP.vhd" "bdf513a05286cf98024b40e5be615f64909fec6a" "20260705061438.165":
+  entity smp at 1( 0) + 0 on 41;
+  architecture rtl of smp at 42( 1064) + 0 on 42;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/DSP_PKG.vhd" "2f14a1837a4c4b2f0b0ed8639209d211d201384c" "20260705061438.164":
+  package dsp_pkg at 1( 0) + 0 on 39 body;
+  package body dsp_pkg at 516( 22652) + 0 on 40;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/SPC700.vhd" "535400545173f5dd9ad251297fa16eaeca2ddb1b" "20260705061438.161":
+  entity spc700 at 1( 0) + 0 on 37;
+  architecture rtl of spc700 at 29( 728) + 0 on 38;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/ALU.vhd" "18bb14146c211f5f7ef7d0809bcb2f3e45caf950" "20260705061438.160":
+  entity spc700_alu at 1( 0) + 0 on 35;
+  architecture rtl of spc700_alu at 33( 774) + 0 on 36;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/MulDiv.vhd" "35a06ab26cadaedf83b94550eea5e975ce0b47a6" "20260705061438.159":
+  entity muldiv at 1( 0) + 0 on 33;
+  architecture rtl of muldiv at 25( 540) + 0 on 34;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/AddrGen.vhd" "a3f8fbbac4565f96259b2585642f616f00fdb885" "20260705061438.159":
+  entity spc700_addrgen at 1( 0) + 0 on 31;
+  architecture rtl of spc700_addrgen at 30( 854) + 0 on 32;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/MCode.vhd" "d9798686ef1402513ebe2f6dddd19ada48707b82" "20260705061438.158":
+  entity spc700_mcode at 1( 0) + 0 on 29;
+  architecture rtl of spc700_mcode at 18( 362) + 0 on 30;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/BCDAdj.vhd" "c771de7cd389b01c3f78fcb48b8c136bc092420c" "20260705061438.131":
+  entity spc700_bcdadj at 1( 0) + 0 on 27;
+  architecture rtl of spc700_bcdadj at 18( 371) + 0 on 28;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/AddSub.vhd" "e14b7460564397b1ca7e52c48beb31e7a059e2a8" "20260705061438.131":
+  entity spc700_addsub at 1( 0) + 0 on 25;
+  architecture rtl of spc700_addsub at 20( 439) + 0 on 26;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/SPC700/SPC700_pkg.vhd" "59463043198ad77c5596aba54df2dc6cf05b8239" "20260705061438.129":
+  package spc700_pkg at 1( 0) + 0 on 23;
+  package body spc700_pkg at 50( 1423) + 0 on 24;
+file / "/home/carlos/devel/fpga/spc-pocket-player/src/fpga/core/spc/CEGen.vhd" "1621415ee971f48c2735e46c073279dcc688a2ad" "20260705061438.129":
+  entity cegen at 1( 0) + 0 on 21;
+  architecture syn of cegen at 17( 227) + 0 on 22;
+file . "bram_sim.vhd" "3228483f824d9babfadc0ca55f22f9304fe0a22d" "20260705061438.129":
+  entity spram_sz at 1( 0) + 0 on 11;
+  architecture syn of spram_sz at 27( 695) + 0 on 12;
+  entity spram at 64( 1726) + 0 on 13;
+  architecture syn of spram at 90( 2383) + 0 on 14;
+  entity dpram_dif at 103( 2759) + 0 on 15;
+  architecture syn of dpram_dif at 138( 3753) + 0 on 16;
+  entity dpram at 198( 5433) + 0 on 17;
+  architecture syn of dpram at 231( 6345) + 0 on 18;
+  entity dpram_difclk at 241( 6772) + 0 on 19;
+  architecture syn of dpram_difclk at 277( 7796) + 0 on 20;
