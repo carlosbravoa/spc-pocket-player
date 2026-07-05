@@ -15,8 +15,10 @@ use STD.textio.all;
 
 entity spc_apu_tb is
 	generic(
-		SPC_FILE : string := "test_tone.spc";
-		RUN_MS   : integer := 100
+		SPC_FILE  : string := "test_tone.spc";
+		RUN_MS    : integer := 100;
+		SPC_FILE2 : string := "";        -- if set, hot-reload this file mid-run
+		RUN2_MS   : integer := 60
 	);
 end spc_apu_tb;
 
@@ -62,8 +64,47 @@ begin
 	stim : process
 		file f          : char_file_t;
 		variable c0, c1 : character;
-		variable addr   : integer := 0;
+		variable addr   : integer;
 		variable word   : std_logic_vector(15 downto 0);
+
+		procedure stream_file(fname : string) is
+		begin
+			report "loading " & fname;
+			LOAD_ACTIVE <= '1';
+			addr := 0;
+			file_open(f, fname, read_mode);
+			while not endfile(f) loop
+				read(f, c0);
+				if endfile(f) then
+					c1 := character'val(0);
+				else
+					read(f, c1);
+				end if;
+				word(7 downto 0)  := std_logic_vector(to_unsigned(character'pos(c0), 8));
+				word(15 downto 8) := std_logic_vector(to_unsigned(character'pos(c1), 8));
+
+				wait until rising_edge(CLK);
+				LOAD_ADDR <= std_logic_vector(to_unsigned(addr, 18));
+				LOAD_DATA <= word;
+				LOAD_WR   <= '1';
+				wait until rising_edge(CLK);
+				LOAD_WR   <= '0';
+				-- pace like data_loader (several clocks between words)
+				wait until rising_edge(CLK);
+				wait until rising_edge(CLK);
+				wait until rising_edge(CLK);
+
+				addr := addr + 2;
+			end loop;
+			file_close(f);
+			report "streamed " & integer'image(addr) & " bytes";
+
+			LOAD_ACTIVE <= '0';
+			wait until rising_edge(CLK);
+			LOAD_DONE <= '1';
+			wait until rising_edge(CLK);
+			LOAD_DONE <= '0';
+		end procedure;
 	begin
 		RESET_N <= '0';
 		wait for 10 * CLK_PERIOD;
@@ -71,45 +112,21 @@ begin
 		RESET_N <= '1';
 		wait for 10 * CLK_PERIOD;
 
-		report "loading " & SPC_FILE;
-		LOAD_ACTIVE <= '1';
-		file_open(f, SPC_FILE, read_mode);
-		while not endfile(f) loop
-			read(f, c0);
-			if endfile(f) then
-				c1 := character'val(0);
-			else
-				read(f, c1);
-			end if;
-			word(7 downto 0)  := std_logic_vector(to_unsigned(character'pos(c0), 8));
-			word(15 downto 8) := std_logic_vector(to_unsigned(character'pos(c1), 8));
-
-			wait until rising_edge(CLK);
-			LOAD_ADDR <= std_logic_vector(to_unsigned(addr, 18));
-			LOAD_DATA <= word;
-			LOAD_WR   <= '1';
-			wait until rising_edge(CLK);
-			LOAD_WR   <= '0';
-			-- pace like data_loader (several clocks between words)
-			wait until rising_edge(CLK);
-			wait until rising_edge(CLK);
-			wait until rising_edge(CLK);
-
-			addr := addr + 2;
-		end loop;
-		file_close(f);
-		report "streamed " & integer'image(addr) & " bytes";
-
-		LOAD_ACTIVE <= '0';
-		wait until rising_edge(CLK);
-		LOAD_DONE <= '1';
-		wait until rising_edge(CLK);
-		LOAD_DONE <= '0';
+		stream_file(SPC_FILE);
 
 		wait until PLAYING = '1';
 		report "APU running";
 
 		wait for RUN_MS * 1 ms;
+
+		if SPC_FILE2'length > 0 then
+			report "hot-reloading " & SPC_FILE2;
+			stream_file(SPC_FILE2);
+			wait until PLAYING = '1';
+			report "APU running (2nd file)";
+			wait for RUN2_MS * 1 ms;
+		end if;
+
 		sim_done <= true;
 		report "sim finished";
 		wait;

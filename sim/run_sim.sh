@@ -10,6 +10,8 @@ RTL=$(cd ../src/fpga/core/spc && pwd)
 FLAGS="--std=08 -fsynopsys -fexplicit"
 SPC=${1:-test_tone.spc}
 RUN_MS=${2:-100}
+SPC2=${3:-}
+RUN2_MS=${4:-60}
 
 mkdir -p work
 cd work
@@ -49,7 +51,12 @@ $GHDL -a $FLAGS bram_sim.vhd \
 $GHDL -e $FLAGS spc_apu_tb
 
 cp -f "../$SPC" ./ 2>/dev/null || true
-echo "=== running: $SPC for ${RUN_MS}ms ==="
-$GHDL -r $FLAGS spc_apu_tb -gSPC_FILE="$(basename "$SPC")" -gRUN_MS="$RUN_MS" \
+GEN2=""
+if [ -n "$SPC2" ]; then
+    cp -f "../$SPC2" ./ 2>/dev/null || true
+    GEN2="-gSPC_FILE2=$(basename "$SPC2") -gRUN2_MS=$RUN2_MS"
+fi
+echo "=== running: $SPC for ${RUN_MS}ms ${SPC2:+then $SPC2 for ${RUN2_MS}ms} ==="
+$GHDL -r $FLAGS spc_apu_tb -gSPC_FILE="$(basename "$SPC")" -gRUN_MS="$RUN_MS" $GEN2 \
     --ieee-asserts=disable 2>&1 | grep -v "metavalue" | tail -40
 echo "=== done: audio in sim/work/audio_out.raw ==="

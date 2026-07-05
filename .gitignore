@@ -1,0 +1,13 @@
+src/fpga/db/
+src/fpga/incremental_db/
+src/fpga/output_files/
+src/fpga/c5_pin_model_dump.txt
+src/fpga/*.qws
+src/fpga/*.rpt
+src/fpga/undo_redo.txt
+sim/work/
+sim/*.raw
+sim/*.wav
+out/
+pkg/Cores/*/bitstream.rbf_r
+*.bak
