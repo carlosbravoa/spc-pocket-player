@@ -47,7 +47,13 @@ entity spc_apu is
 		-- auto-advance: .spcpak entries carry the play length (seconds) at
 		-- offset 0x10180 with magic 0x4C50 ("PL") at 0x10182. ADVANCE pulses
 		-- one CLK when the elapsed time reaches the tagged length.
-		ADVANCE     : out std_logic
+		ADVANCE     : out std_logic;
+
+		ELAPSED_SEC : out std_logic_vector(15 downto 0);
+		LENGTH_SEC  : out std_logic_vector(15 downto 0);  -- 0 when untagged
+		-- 255 = full volume; ramps to 0 over the last 2 seconds of a
+		-- tagged song (fade-out)
+		FADE_LEVEL  : out std_logic_vector(7 downto 0)
 	);
 end spc_apu;
 
@@ -99,6 +105,8 @@ architecture rtl of spc_apu is
 	signal SND_RDY_I    : std_logic;
 	signal SAMP_CNT     : integer range 0 to 31999 := 0;
 	signal ELAPSED      : unsigned(15 downto 0) := (others => '0');
+	signal FADE_LVL     : unsigned(7 downto 0) := (others => '1');
+	signal FADE_CNT     : integer range 0 to 249 := 0;
 
 	function printable(b : std_logic_vector(7 downto 0)) return std_logic_vector is
 	begin
@@ -198,18 +206,26 @@ begin
 
 	SND_RDY <= SND_RDY_I;
 
-	-- elapsed-time counter and auto-advance pulse
+	ELAPSED_SEC <= std_logic_vector(ELAPSED);
+	LENGTH_SEC  <= std_logic_vector(LEN_SEC) when LEN_VALID = '1' else (others => '0');
+	FADE_LEVEL  <= std_logic_vector(FADE_LVL);
+
+	-- elapsed-time counter, fade-out ramp and auto-advance pulse
 	process(CLK, RESET_N)
 	begin
 		if RESET_N = '0' then
 			SAMP_CNT <= 0;
 			ELAPSED  <= (others => '0');
 			ADVANCE  <= '0';
+			FADE_LVL <= (others => '1');
+			FADE_CNT <= 0;
 		elsif rising_edge(CLK) then
 			ADVANCE <= '0';
 			if LSTATE /= LS_RUN then
 				SAMP_CNT <= 0;
 				ELAPSED  <= (others => '0');
+				FADE_LVL <= (others => '1');
+				FADE_CNT <= 0;
 			elsif SND_RDY_I = '1' then
 				if SAMP_CNT = 31999 then
 					SAMP_CNT <= 0;
@@ -219,6 +235,18 @@ begin
 					end if;
 				else
 					SAMP_CNT <= SAMP_CNT + 1;
+				end if;
+
+				-- 2s fade: 256 steps x 250 samples = 64000 samples
+				if LEN_VALID = '1' and LEN_SEC > 2 and ELAPSED >= LEN_SEC - 2 then
+					if FADE_CNT = 249 then
+						FADE_CNT <= 0;
+						if FADE_LVL /= 0 then
+							FADE_LVL <= FADE_LVL - 1;
+						end if;
+					else
+						FADE_CNT <= FADE_CNT + 1;
+					end if;
 				end if;
 			end if;
 		end if;

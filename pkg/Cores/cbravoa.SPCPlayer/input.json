@@ -19,6 +19,11 @@
             "id": 2,
             "name": "Previous Track",
             "key": "pad_dpad_left"
+          },
+          {
+            "id": 3,
+            "name": "Shuffle On/Off",
+            "key": "pad_btn_y"
           }
         ]
       }

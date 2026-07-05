@@ -44,7 +44,14 @@ python3 tools/make_spcpak.py ~/spc/chrono-trigger/ -o "Chrono Trigger.spcpak"
 A plain `.spc` is just a 1-song pack — both load the same way.
 
 **Controls**: dpad right = next track, dpad left = previous track,
-A = restart track.
+A = restart track, Y = shuffle on/off ("S" indicator on screen; next/auto
+picks a random other track while enabled).
+
+**Display**: track number, shuffle indicator, elapsed/total time (MM:SS),
+song + game title, stereo VU meters.
+
+**Fade-out**: tagged songs fade over their final 2 seconds before
+advancing.
 
 **Auto-advance**: the pack tool reads each song's ID666 length+fade tag
 (or `--default-length`, 180s, when untagged; 0 = loop forever) and stamps it

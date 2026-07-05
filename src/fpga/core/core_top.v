@@ -508,6 +508,12 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     wire            btn_next    = cont1_key_s74[3] & ~cont1_key_prev[3];
     wire            btn_prev    = cont1_key_s74[2] & ~cont1_key_prev[2];
     wire            btn_restart = cont1_key_s74[4] & ~cont1_key_prev[4];
+    wire            btn_shuffle = cont1_key_s74[7] & ~cont1_key_prev[7];   // Y
+
+    reg             shuffle_en = 0;
+    reg     [15:0]  lfsr = 16'hACE1;
+    reg             pending_random = 0;
+    reg     [15:0]  rand_rem;
 
     reg             allcomplete_1 = 0;
     reg             reset_n_1 = 0;
@@ -535,6 +541,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_ACK      = 6;
     localparam TK_WAIT     = 7;
     localparam TK_RETRY    = 9;
+    localparam TK_RAND     = 10;
 
     // retry management: heals boot-time races where the data table is not
     // yet populated, and read errors (with a shorter fallback length that
@@ -556,6 +563,10 @@ always @(posedge clk_74a) begin
     allcomplete_1  <= dataslot_allcomplete;
     reset_n_1      <= reset_n;
 
+    lfsr <= lfsr[0] ? (lfsr >> 1) ^ 16'hB400 : lfsr >> 1;
+    if (btn_shuffle)
+        shuffle_en <= ~shuffle_en;
+
     case (tkstate)
         TK_IDLE: begin
             if (pending_load) begin
@@ -563,10 +574,30 @@ always @(posedge clk_74a) begin
                 issue_index  <= pending_index;
                 if (pending_recount) begin
                     pending_recount <= 0;
+                    pending_random  <= 0;
                     tkstate <= TK_SIZE0;
+                end else if (pending_random) begin
+                    pending_random <= 0;
+                    rand_rem <= lfsr;
+                    tkstate <= TK_RAND;
                 end else begin
                     tkstate <= TK_ISSUE;
                 end
+            end
+        end
+
+        TK_RAND: begin
+            // rand_rem mod song_count by repeated subtraction, then avoid
+            // repeating the current song
+            if (rand_rem >= {6'd0, song_count}) begin
+                rand_rem <= rand_rem - {6'd0, song_count};
+            end else begin
+                if (rand_rem[9:0] == song_index)
+                    issue_index <= (rand_rem[9:0] + 1'b1 == song_count) ? 10'd0
+                                                                        : rand_rem[9:0] + 1'b1;
+                else
+                    issue_index <= rand_rem[9:0];
+                tkstate <= TK_ISSUE;
             end
         end
 
@@ -668,6 +699,7 @@ always @(posedge clk_74a) begin
         (dataslot_update && dataslot_update_id == 16'h0)) begin
         pending_load    <= 1;
         pending_recount <= 1;
+        pending_random  <= 0;
         pending_index   <= 0;
         retry_cnt       <= 0;
         load_error      <= 0;
@@ -675,16 +707,19 @@ always @(posedge clk_74a) begin
     end else if (have_pak && song_count != 0) begin
         if (btn_next || (adv_toggle_s ^ adv_toggle_1)) begin
             pending_load  <= 1;
+            pending_random <= shuffle_en && song_count > 1;
             pending_index <= (song_index + 1'b1 == song_count) ? 10'd0 : song_index + 1'b1;
             retry_cnt     <= 0;
             load_error    <= 0;
         end else if (btn_prev) begin
             pending_load  <= 1;
+            pending_random <= 0;
             pending_index <= (song_index == 0) ? song_count - 1'b1 : song_index - 1'b1;
             retry_cnt     <= 0;
             load_error    <= 0;
         end else if (btn_restart) begin
             pending_load  <= 1;
+            pending_random <= 0;
             pending_index <= song_index;
             retry_cnt     <= 0;
             load_error    <= 0;
@@ -754,6 +789,9 @@ data_loader #(
     wire            apu_playing;
     wire    [511:0] apu_title_bits;
     wire            apu_advance;
+    wire    [15:0]  apu_elapsed;
+    wire    [15:0]  apu_length;
+    wire    [7:0]   apu_fade;
 
 spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
@@ -770,7 +808,10 @@ spc_apu apu (
     .SND_RDY        ( apu_snd_rdy ),
     .PLAYING        ( apu_playing ),
     .TITLE_BITS     ( apu_title_bits ),
-    .ADVANCE        ( apu_advance )
+    .ADVANCE        ( apu_advance ),
+    .ELAPSED_SEC    ( apu_elapsed ),
+    .LENGTH_SEC     ( apu_length ),
+    .FADE_LEVEL     ( apu_fade )
 );
 
 // auto-advance pulse -> toggle for safe crossing into clk_74a
@@ -792,8 +833,12 @@ always @(posedge clk_sys_21_48) begin
 end
 
     wire audio_muted = inmenu_s | ~apu_playing | (unmute_cnt != 10'd640);
-    wire signed [15:0] audio_l_out = audio_muted ? 16'sd0 : $signed(apu_audio_l);
-    wire signed [15:0] audio_r_out = audio_muted ? 16'sd0 : $signed(apu_audio_r);
+
+// fade-out: scale by the APU's fade level (255 = unity)
+    wire signed [24:0] fade_mul_l = $signed(apu_audio_l) * $signed({1'b0, apu_fade});
+    wire signed [24:0] fade_mul_r = $signed(apu_audio_r) * $signed({1'b0, apu_fade});
+    wire signed [15:0] audio_l_out = audio_muted ? 16'sd0 : fade_mul_l[23:8];
+    wire signed [15:0] audio_r_out = audio_muted ? 16'sd0 : fade_mul_r[23:8];
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // VU levels for the visualization (sys domain, sampled by video domain)
@@ -803,10 +848,8 @@ end
     reg     [14:0]  vu_level_l = 0;
     reg     [14:0]  vu_level_r = 0;
 
-    wire    [14:0]  abs_l = audio_muted ? 15'd0
-                          : apu_audio_l[15] ? (~apu_audio_l[14:0] + 1'b1) : apu_audio_l[14:0];
-    wire    [14:0]  abs_r = audio_muted ? 15'd0
-                          : apu_audio_r[15] ? (~apu_audio_r[14:0] + 1'b1) : apu_audio_r[14:0];
+    wire    [14:0]  abs_l = audio_l_out[15] ? (~audio_l_out[14:0] + 1'b1) : audio_l_out[14:0];
+    wire    [14:0]  abs_r = audio_r_out[15] ? (~audio_r_out[14:0] + 1'b1) : audio_r_out[14:0];
 
 always @(posedge clk_sys_21_48) begin
     if (apu_snd_rdy) begin
@@ -851,6 +894,8 @@ assign video_hs = vidout_hs;
     reg [511:0] title_vid;
     reg [9:0]   idx_vid, cnt_vid;
     reg [1:0]   status_vid;
+    reg [15:0]  elapsed_vid, length_vid;
+    reg         shuffle_vid;
 
     reg [23:0]  border_rgb;
 always @(*) begin
@@ -885,6 +930,23 @@ end
     wire [3:0]  c_d1 = (cnt_vid / 'd10) % 'd10;
     wire [3:0]  c_d0 = cnt_vid % 'd10;
 
+    // elapsed / total time, capped at 99:59
+    wire [15:0] el_cap = (elapsed_vid > 16'd5999) ? 16'd5999 : elapsed_vid;
+    wire [15:0] ln_cap = (length_vid > 16'd5999) ? 16'd5999 : length_vid;
+    wire [6:0]  el_m = el_cap / 'd60;
+    wire [5:0]  el_s = el_cap % 'd60;
+    wire [6:0]  ln_m = ln_cap / 'd60;
+    wire [5:0]  ln_s = ln_cap % 'd60;
+    wire        has_len = (length_vid != 0);
+    wire [3:0]  el_m_t = el_m / 'd10;
+    wire [3:0]  el_m_o = el_m % 'd10;
+    wire [3:0]  el_s_t = el_s / 'd10;
+    wire [3:0]  el_s_o = el_s % 'd10;
+    wire [3:0]  ln_m_t = ln_m / 'd10;
+    wire [3:0]  ln_m_o = ln_m % 'd10;
+    wire [3:0]  ln_s_t = ln_s / 'd10;
+    wire [3:0]  ln_s_o = ln_s % 'd10;
+
     // font lookup is registered, so address it with a 1-pixel lookahead;
     // the whole text layer lands shifted 1px left, uniformly (invisible)
     wire [9:0]  la_vx = x_count + 1'b1 - VID_H_BPORCH;
@@ -893,13 +955,26 @@ end
     reg  [7:0]  track_ch;
 always @(*) begin
     case (la_ci)
-        5'd12:   track_ch = (n_d2 == 0) ? 8'h20 : {4'h3, n_d2};
-        5'd13:   track_ch = (n_d2 == 0 && n_d1 == 0) ? 8'h20 : {4'h3, n_d1};
-        5'd14:   track_ch = {4'h3, n_d0};
-        5'd15:   track_ch = 8'h2F;          // '/'
-        5'd16:   track_ch = (c_d2 == 0) ? 8'h20 : {4'h3, c_d2};
-        5'd17:   track_ch = (c_d2 == 0 && c_d1 == 0) ? 8'h20 : {4'h3, c_d1};
-        5'd18:   track_ch = {4'h3, c_d0};
+        5'd1:    track_ch = (n_d2 == 0) ? 8'h20 : {4'h3, n_d2};
+        5'd2:    track_ch = (n_d2 == 0 && n_d1 == 0) ? 8'h20 : {4'h3, n_d1};
+        5'd3:    track_ch = {4'h3, n_d0};
+        5'd4:    track_ch = 8'h2F;          // '/'
+        5'd5:    track_ch = (c_d2 == 0) ? 8'h20 : {4'h3, c_d2};
+        5'd6:    track_ch = (c_d2 == 0 && c_d1 == 0) ? 8'h20 : {4'h3, c_d1};
+        5'd7:    track_ch = {4'h3, c_d0};
+        5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S'
+        // elapsed MM:SS / total MM:SS, right side
+        5'd20:   track_ch = {4'h3, el_m_t};
+        5'd21:   track_ch = {4'h3, el_m_o};
+        5'd22:   track_ch = 8'h3A;          // ':'
+        5'd23:   track_ch = {4'h3, el_s_t};
+        5'd24:   track_ch = {4'h3, el_s_o};
+        5'd25:   track_ch = has_len ? 8'h2F : 8'h20;
+        5'd26:   track_ch = has_len ? {4'h3, ln_m_t} : 8'h20;
+        5'd27:   track_ch = has_len ? {4'h3, ln_m_o} : 8'h20;
+        5'd28:   track_ch = has_len ? 8'h3A : 8'h20;
+        5'd29:   track_ch = has_len ? {4'h3, ln_s_t} : 8'h20;
+        5'd30:   track_ch = has_len ? {4'h3, ln_s_o} : 8'h20;
         default: track_ch = 8'h20;
     endcase
 end
@@ -956,6 +1031,9 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             idx_vid <= song_index;
             cnt_vid <= song_count;
             status_vid <= load_status;
+            elapsed_vid <= apu_elapsed;
+            length_vid <= apu_length;
+            shuffle_vid <= shuffle_en;
         end
 
         // we want HS to occur a bit after VS, not on the same cycle

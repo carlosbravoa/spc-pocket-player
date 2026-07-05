@@ -39,6 +39,9 @@ architecture sim of spc_apu_tb is
 	signal PLAYING     : std_logic;
 	signal TITLE_BITS  : std_logic_vector(511 downto 0);
 	signal ADVANCE     : std_logic;
+	signal ELAPSED_SEC : std_logic_vector(15 downto 0);
+	signal LENGTH_SEC  : std_logic_vector(15 downto 0);
+	signal FADE_LEVEL  : std_logic_vector(7 downto 0);
 
 	impure function title_str return string is
 		variable s : string(1 to 64);
@@ -71,15 +74,25 @@ begin
 		SND_RDY     => SND_RDY,
 		PLAYING     => PLAYING,
 		TITLE_BITS  => TITLE_BITS,
-		ADVANCE     => ADVANCE
+		ADVANCE     => ADVANCE,
+		ELAPSED_SEC => ELAPSED_SEC,
+		LENGTH_SEC  => LENGTH_SEC,
+		FADE_LEVEL  => FADE_LEVEL
 	);
 
 	adv_mon : process(CLK)
+		variable last_fade : std_logic_vector(7 downto 0) := x"FF";
 	begin
 		if rising_edge(CLK) then
 			if ADVANCE = '1' then
 				report "ADVANCE pulse at " & time'image(now);
 			end if;
+			if FADE_LEVEL /= last_fade and FADE_LEVEL(5 downto 0) = "000000" then
+				report "FADE_LEVEL=" & integer'image(to_integer(unsigned(FADE_LEVEL)))
+					& " elapsed=" & integer'image(to_integer(unsigned(ELAPSED_SEC)))
+					& " at " & time'image(now);
+			end if;
+			last_fade := FADE_LEVEL;
 		end if;
 	end process;
 
