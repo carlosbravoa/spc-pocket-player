@@ -637,24 +637,50 @@ always @(posedge clk_74a) begin
                 target_dataslot_id         <= 16'h0;
                 target_dataslot_slotoffset <= song_offset;
                 target_dataslot_bridgeaddr <= 32'h10000000;
-                // for the last (or only) track, request 0xFFFFFFFF: APF caps
-                // the read at end-of-file, sidestepping any exact-EOF edge
+                // never let a read end exactly at end-of-file: reads that
+                // touch EOF hang APF (hardware-observed). For the last (or
+                // only) track, stop 2 bytes short - only the tail of the
+                // extra-RAM mirror is lost.
                 target_dataslot_length     <=
                     short_read ? 32'h10180
                     : (pak_size - song_offset > SONG_BYTES) ? SONG_BYTES
-                                                            : 32'hFFFFFFFF;
+                    : (pak_size - song_offset - 32'd2);
                 target_dataslot_read <= 1;
                 track_loading <= 1;
+                retry_timer <= 0;
                 tkstate <= TK_ACK;
             end
         end
         TK_ACK: begin
-            if (target_dataslot_ack) begin
+            retry_timer <= retry_timer + 1'b1;
+            // done can arrive without a busy/ack phase (fast or rejected
+            // commands) - accept it here too, but only after the stale done
+            // from a previous command has been cleared (a few cycles)
+            if (target_dataslot_done && retry_timer > 24'd16) begin
+                target_dataslot_read <= 0;
+                track_loading <= 0;
+                if (target_dataslot_err != 0) begin
+                    short_read <= 1;
+                    retry_timer <= 0;
+                    tkstate <= TK_RETRY;
+                end else begin
+                    retry_cnt  <= 0;
+                    load_error <= 0;
+                    tkstate <= TK_IDLE;
+                end
+            end else if (target_dataslot_ack) begin
                 target_dataslot_read <= 0;
                 tkstate <= TK_WAIT;
+            end else if (&retry_timer) begin
+                // watchdog (~220ms): command never started - abort and retry
+                target_dataslot_read <= 0;
+                track_loading <= 0;
+                short_read <= 1;
+                tkstate <= TK_RETRY;
             end
         end
         TK_WAIT: begin
+            retry_timer <= retry_timer + 1'b1;
             if (target_dataslot_done) begin
                 track_loading <= 0;
                 if (target_dataslot_err != 0) begin
@@ -666,6 +692,11 @@ always @(posedge clk_74a) begin
                     load_error <= 0;
                     tkstate <= TK_IDLE;
                 end
+            end else if (&retry_timer) begin
+                // watchdog: transfer never completed - abort and retry
+                track_loading <= 0;
+                short_read <= 1;
+                tkstate <= TK_RETRY;
             end
         end
 
@@ -896,6 +927,7 @@ assign video_hs = vidout_hs;
     reg [1:0]   status_vid;
     reg [15:0]  elapsed_vid, length_vid;
     reg         shuffle_vid;
+    reg         ever_played = 0;
 
     reg [23:0]  border_rgb;
 always @(*) begin
@@ -919,7 +951,12 @@ end
     wire        line_track = (visible_y[8:4] == 'd2);
     wire        line_title = (visible_y[8:4] == 'd4);
     wire        line_game  = (visible_y[8:4] == 'd6);
-    wire        any_text_line = line_track | line_title | line_game;
+    wire        line_hint  = (visible_y[8:4] == 'd13);
+    wire        any_text_line = line_track | line_title | line_game | line_hint;
+
+    // subtle control hints, bottom of screen
+    localparam [8*32-1:0] HINTS = " <PREV  NEXT>  A:RESTART  Y:SHUF";
+    wire [7:0]  hint_ch = HINTS[(31 - la_ci)*8 +: 8];
 
     // track counter digits (from once-per-frame latched values)
     wire [9:0]  disp_n = idx_vid + 1'b1;
@@ -981,6 +1018,7 @@ end
 
     wire [7:0]  font_ch = line_title ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
                         : line_game  ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
+                        : line_hint  ? hint_ch
                         : track_ch;
 
     wire [7:0]  font_bits;
@@ -1027,6 +1065,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             vu_l_vid <= vu_level_l;
             vu_r_vid <= vu_level_r;
             playing_vid <= apu_playing;
+            if (apu_playing)
+                ever_played <= 1;
             title_vid <= apu_title_bits;
             idx_vid <= song_index;
             cnt_vid <= song_count;
@@ -1053,9 +1093,12 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                 // dark background
                 vidout_rgb <= 24'h101018;
 
-                if (!playing_vid) begin
-                    // status frame border: red = waiting for a file,
-                    // orange = loading, magenta = read error
+                if (!playing_vid && (!ever_played || status_vid == 2'd2)) begin
+                    // status frame border, shown only before the first song
+                    // has ever played or on a persistent error - brief track
+                    // loads keep the normal UI (no flashing):
+                    // red = waiting for a file, orange = loading,
+                    // magenta = read error
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
@@ -1066,6 +1109,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                         vidout_rgb <= 24'hF0F0F0;
                     else if (line_game && text_px)
                         vidout_rgb <= 24'h9098A8;
+                    else if (line_hint && text_px)
+                        vidout_rgb <= 24'h50505C;
                     // VU meters: L rows 144-167, R rows 184-207
                     else if (visible_y >= 'd144 && visible_y < 'd168) begin
                         if (visible_x < bar_l)
@@ -1073,8 +1118,7 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     end else if (visible_y >= 'd184 && visible_y < 'd208) begin
                         if (visible_x < bar_r)
                             vidout_rgb <= 24'h3060C0;   // blue
-                    end else if (visible_y == 'd136 || visible_y == 'd176 ||
-                                 visible_y == 'd216) begin
+                    end else if (visible_y == 'd136 || visible_y == 'd176) begin
                         // faint separator lines
                         vidout_rgb <= 24'h202028;
                     end

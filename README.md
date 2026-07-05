@@ -58,9 +58,15 @@ advancing.
 into the entry; the core moves to the next track when the time is up. Plain
 `.spc` files loaded directly loop forever.
 
-**Status border** (when nothing is playing): red = waiting for a file,
-orange = loading, magenta = file read failed (the core retries
-automatically ~10 times first).
+**Status border** (shown only before the first song plays, or on a
+persistent error): red = waiting for a file, orange = loading, magenta =
+file read failed (the core retries automatically ~10 times first). Track
+changes keep the normal UI on screen.
+
+**Echo-buffer hygiene**: many SPC dumps carry garbage in the echo buffer
+region, audible as a noise burst with an echo tail at song start. The
+loader zeroes the echo region on every load (only when the song has echo
+writes enabled, so repurposed RAM is never touched).
 
 ## Building
 

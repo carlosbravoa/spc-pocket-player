@@ -117,10 +117,20 @@ architecture rtl of spc_apu is
 	end function;
 
 	-- loader FSM
-	type LoadState_t is (LS_IDLE, LS_ARAM_HI, LS_REGSEQ, LS_START, LS_RUN);
+	type LoadState_t is (LS_IDLE, LS_ARAM_HI, LS_REGSEQ, LS_ECHO_CLR, LS_START, LS_RUN);
 	signal LSTATE      : LoadState_t;
 	signal REG_IDX     : unsigned(3 downto 0);
 	signal SEQ_CNT     : unsigned(3 downto 0);
+
+	-- echo-region clear: many .spc dumps carry garbage in the echo buffer,
+	-- which plays back as a noise burst with an echo tail at song start.
+	-- Zero ESA..ESA+len before releasing reset (only when echo writes are
+	-- enabled - FLG bit 5 clear - so repurposed RAM is never touched).
+	signal ECHO_ESA    : std_logic_vector(7 downto 0);
+	signal ECHO_EDL    : unsigned(3 downto 0);
+	signal ECHO_WR_OFF : std_logic;
+	signal CLR_CNT     : unsigned(14 downto 0);
+	signal CLR_LEN     : unsigned(14 downto 0);
 
 	signal ADDR_U      : unsigned(17 downto 0);
 
@@ -329,6 +339,13 @@ begin
 							IO_ADDR <= std_logic_vector(resize(ADDR_U - x"10000", 17));
 							IO_DAT  <= LOAD_DATA;
 							IO_WR   <= '1';
+							-- snoop echo configuration (FLG/ESA at 0x6C/0x6D, EDL at 0x7D)
+							if ADDR_U = x"1016C" then
+								ECHO_WR_OFF <= LOAD_DATA(5);
+								ECHO_ESA    <= LOAD_DATA(15 downto 8);
+							elsif ADDR_U = x"1017C" then
+								ECHO_EDL <= unsigned(LOAD_DATA(11 downto 8));
+							end if;
 						elsif ADDR_U = x"10180" then
 							-- .spcpak play-length tag (seconds)
 							LEN_SEC <= unsigned(LOAD_DATA);
@@ -377,10 +394,30 @@ begin
 					elsif SEQ_CNT = 7 then
 						if REG_IDX = 7 then
 							SEQ_CNT <= (others => '0');
-							LSTATE  <= LS_START;
+							CLR_CNT <= (others => '0');
+							if ECHO_EDL = 0 then
+								CLR_LEN <= to_unsigned(4, 15);
+							else
+								CLR_LEN <= resize(ECHO_EDL, 15) sll 11;  -- EDL*2048
+							end if;
+							if ECHO_WR_OFF = '1' then
+								LSTATE <= LS_START;
+							else
+								LSTATE <= LS_ECHO_CLR;
+							end if;
 						else
 							REG_IDX <= REG_IDX + 1;
 						end if;
+					end if;
+
+				when LS_ECHO_CLR =>
+					-- zero the echo buffer (1 byte per clock, max 30KB = 1.4ms)
+					LD_ARAM_A  <= std_logic_vector((resize(unsigned(ECHO_ESA), 16) sll 8) + resize(CLR_CNT, 16));
+					LD_ARAM_D  <= x"00";
+					LD_ARAM_WR <= '1';
+					CLR_CNT <= CLR_CNT + 1;
+					if CLR_CNT = CLR_LEN - 1 then
+						LSTATE <= LS_START;
 					end if;
 
 				when LS_START =>
