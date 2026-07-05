@@ -46,6 +46,15 @@ A plain `.spc` is just a 1-song pack — both load the same way.
 **Controls**: dpad right = next track, dpad left = previous track,
 A = restart track.
 
+**Auto-advance**: the pack tool reads each song's ID666 length+fade tag
+(or `--default-length`, 180s, when untagged; 0 = loop forever) and stamps it
+into the entry; the core moves to the next track when the time is up. Plain
+`.spc` files loaded directly loop forever.
+
+**Status border** (when nothing is playing): red = waiting for a file,
+orange = loading, magenta = file read failed (the core retries
+automatically ~10 times first).
+
 ## Building
 
 Requires Quartus Prime (Lite) with Cyclone V support.

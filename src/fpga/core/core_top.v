@@ -534,6 +534,15 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_ISSUE    = 5;
     localparam TK_ACK      = 6;
     localparam TK_WAIT     = 7;
+    localparam TK_RETRY    = 9;
+
+    // retry management: heals boot-time races where the data table is not
+    // yet populated, and read errors (with a shorter fallback length that
+    // avoids reading up to the exact end-of-file)
+    reg     [23:0]  retry_timer = 0;
+    reg     [3:0]   retry_cnt = 0;
+    reg             short_read = 0;     // fallback: skip the extra-RAM tail
+    reg             load_error = 0;     // sticky: retries exhausted
 
     reg     [9:0]   datatable_addr_r = 0;
 assign datatable_addr = datatable_addr_r;
@@ -589,15 +598,20 @@ always @(posedge clk_74a) begin
 
         TK_ISSUE: begin
             if (song_count == 0) begin
-                tkstate <= TK_IDLE;         // empty/invalid file
+                // data table not populated yet (boot race) - retry
+                retry_timer <= 0;
+                tkstate <= TK_RETRY;
             end else begin
                 song_index <= issue_index;
                 target_dataslot_id         <= 16'h0;
                 target_dataslot_slotoffset <= song_offset;
                 target_dataslot_bridgeaddr <= 32'h10000000;
+                // for the last (or only) track, request 0xFFFFFFFF: APF caps
+                // the read at end-of-file, sidestepping any exact-EOF edge
                 target_dataslot_length     <=
-                    (pak_size - song_offset >= SONG_BYTES) ? SONG_BYTES
-                                                           : pak_size - song_offset;
+                    short_read ? 32'h10180
+                    : (pak_size - song_offset > SONG_BYTES) ? SONG_BYTES
+                                                            : 32'hFFFFFFFF;
                 target_dataslot_read <= 1;
                 track_loading <= 1;
                 tkstate <= TK_ACK;
@@ -612,35 +626,78 @@ always @(posedge clk_74a) begin
         TK_WAIT: begin
             if (target_dataslot_done) begin
                 track_loading <= 0;
-                tkstate <= TK_IDLE;
+                if (target_dataslot_err != 0) begin
+                    short_read <= 1;        // next attempt avoids the EOF edge
+                    retry_timer <= 0;
+                    tkstate <= TK_RETRY;
+                end else begin
+                    retry_cnt  <= 0;
+                    load_error <= 0;
+                    tkstate <= TK_IDLE;
+                end
+            end
+        end
+
+        TK_RETRY: begin
+            // wait ~220ms, then re-run the whole flow (size + count + load)
+            retry_timer <= retry_timer + 1'b1;
+            if (&retry_timer) begin
+                if (retry_cnt == 4'd10) begin
+                    load_error <= 1;        // give up until the user acts
+                    tkstate <= TK_IDLE;
+                end else begin
+                    retry_cnt <= retry_cnt + 1'b1;
+                    pending_load    <= 1;
+                    pending_recount <= 1;
+                    pending_index   <= issue_index;
+                    tkstate <= TK_IDLE;
+                end
             end
         end
 
         default: tkstate <= TK_IDLE;
     endcase
 
-    // triggers: initial load (allcomplete or reset exit), file change, buttons.
-    // placed after the FSM case so a trigger arriving in the same cycle
-    // TK_IDLE consumes the previous request is not lost (last write wins)
+    // triggers: initial load (allcomplete or reset exit), file change,
+    // buttons, auto-advance. placed after the FSM case so a trigger arriving
+    // in the same cycle TK_IDLE consumes the previous request is not lost
+    // (last write wins)
+    adv_toggle_1 <= adv_toggle_s;
     if ((dataslot_allcomplete & ~allcomplete_1) ||
         (reset_n & ~reset_n_1) ||
         (dataslot_update && dataslot_update_id == 16'h0)) begin
         pending_load    <= 1;
         pending_recount <= 1;
         pending_index   <= 0;
+        retry_cnt       <= 0;
+        load_error      <= 0;
+        short_read      <= 0;
     end else if (have_pak && song_count != 0) begin
-        if (btn_next) begin
+        if (btn_next || (adv_toggle_s ^ adv_toggle_1)) begin
             pending_load  <= 1;
             pending_index <= (song_index + 1'b1 == song_count) ? 10'd0 : song_index + 1'b1;
+            retry_cnt     <= 0;
+            load_error    <= 0;
         end else if (btn_prev) begin
             pending_load  <= 1;
             pending_index <= (song_index == 0) ? song_count - 1'b1 : song_index - 1'b1;
+            retry_cnt     <= 0;
+            load_error    <= 0;
         end else if (btn_restart) begin
             pending_load  <= 1;
             pending_index <= song_index;
+            retry_cnt     <= 0;
+            load_error    <= 0;
         end
     end
 end
+
+    wire            adv_toggle_s;
+    reg             adv_toggle_1 = 0;
+synch_3 s_adv(apu_adv_toggle, adv_toggle_s, clk_74a);
+
+    // 0 = waiting for file (red), 1 = loading (orange), 2 = error (magenta)
+    wire    [1:0]   load_status = load_error ? 2'd2 : track_loading ? 2'd1 : 2'd0;
 
     wire    spc_downloading_s;
 synch_3 s_dl(track_loading, spc_downloading_s, clk_sys_21_48);
@@ -696,6 +753,7 @@ data_loader #(
     wire            apu_snd_rdy;
     wire            apu_playing;
     wire    [511:0] apu_title_bits;
+    wire            apu_advance;
 
 spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
@@ -711,12 +769,31 @@ spc_apu apu (
     .AUDIO_R        ( apu_audio_r ),
     .SND_RDY        ( apu_snd_rdy ),
     .PLAYING        ( apu_playing ),
-    .TITLE_BITS     ( apu_title_bits )
+    .TITLE_BITS     ( apu_title_bits ),
+    .ADVANCE        ( apu_advance )
 );
 
-// mute while the Pocket menu is open
-    wire signed [15:0] audio_l_out = inmenu_s ? 16'sd0 : $signed(apu_audio_l);
-    wire signed [15:0] audio_r_out = inmenu_s ? 16'sd0 : $signed(apu_audio_r);
+// auto-advance pulse -> toggle for safe crossing into clk_74a
+    reg     apu_adv_toggle = 0;
+always @(posedge clk_sys_21_48) begin
+    if (apu_advance)
+        apu_adv_toggle <= ~apu_adv_toggle;
+end
+
+// mute while the Pocket menu is open, while a track is loading, and for
+// ~20ms after playback starts (the DSP pipelines settle with stale state
+// right after reset release, which is audible otherwise)
+    reg     [9:0]   unmute_cnt = 0;
+always @(posedge clk_sys_21_48) begin
+    if (!apu_playing)
+        unmute_cnt <= 0;
+    else if (apu_snd_rdy && unmute_cnt != 10'd640)
+        unmute_cnt <= unmute_cnt + 1'b1;
+end
+
+    wire audio_muted = inmenu_s | ~apu_playing | (unmute_cnt != 10'd640);
+    wire signed [15:0] audio_l_out = audio_muted ? 16'sd0 : $signed(apu_audio_l);
+    wire signed [15:0] audio_r_out = audio_muted ? 16'sd0 : $signed(apu_audio_r);
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // VU levels for the visualization (sys domain, sampled by video domain)
@@ -726,8 +803,10 @@ spc_apu apu (
     reg     [14:0]  vu_level_l = 0;
     reg     [14:0]  vu_level_r = 0;
 
-    wire    [14:0]  abs_l = apu_audio_l[15] ? (~apu_audio_l[14:0] + 1'b1) : apu_audio_l[14:0];
-    wire    [14:0]  abs_r = apu_audio_r[15] ? (~apu_audio_r[14:0] + 1'b1) : apu_audio_r[14:0];
+    wire    [14:0]  abs_l = audio_muted ? 15'd0
+                          : apu_audio_l[15] ? (~apu_audio_l[14:0] + 1'b1) : apu_audio_l[14:0];
+    wire    [14:0]  abs_r = audio_muted ? 15'd0
+                          : apu_audio_r[15] ? (~apu_audio_r[14:0] + 1'b1) : apu_audio_r[14:0];
 
 always @(posedge clk_sys_21_48) begin
     if (apu_snd_rdy) begin
@@ -771,6 +850,16 @@ assign video_hs = vidout_hs;
     reg         playing_vid;
     reg [511:0] title_vid;
     reg [9:0]   idx_vid, cnt_vid;
+    reg [1:0]   status_vid;
+
+    reg [23:0]  border_rgb;
+always @(*) begin
+    case (status_vid)
+        2'd1:    border_rgb = 24'hC08020;   // loading: orange
+        2'd2:    border_rgb = 24'hC030C0;   // read error: magenta
+        default: border_rgb = 24'h802020;   // waiting for a file: red
+    endcase
+end
 
     // bar lengths in pixels (0-511): use upper bits of the 15-bit level
     wire [8:0]  bar_l = vu_l_vid[14:6];
@@ -866,6 +955,7 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             title_vid <= apu_title_bits;
             idx_vid <= song_index;
             cnt_vid <= song_count;
+            status_vid <= load_status;
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -886,10 +976,11 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                 vidout_rgb <= 24'h101018;
 
                 if (!playing_vid) begin
-                    // waiting for a file: dim red frame border
+                    // status frame border: red = waiting for a file,
+                    // orange = loading, magenta = read error
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
-                        vidout_rgb <= 24'h802020;
+                        vidout_rgb <= border_rgb;
                 end else begin
                     if (line_track && text_px)
                         vidout_rgb <= 24'h70D080;

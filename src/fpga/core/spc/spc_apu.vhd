@@ -42,7 +42,12 @@ entity spc_apu is
 
 		-- ID666 song title (32 chars) + game title (32 chars) from the header,
 		-- sanitized to printable ASCII. Static while PLAYING; byte 0 in bits 7:0.
-		TITLE_BITS  : out std_logic_vector(511 downto 0)
+		TITLE_BITS  : out std_logic_vector(511 downto 0);
+
+		-- auto-advance: .spcpak entries carry the play length (seconds) at
+		-- offset 0x10180 with magic 0x4C50 ("PL") at 0x10182. ADVANCE pulses
+		-- one CLK when the elapsed time reaches the tagged length.
+		ADVANCE     : out std_logic
 	);
 end spc_apu;
 
@@ -87,6 +92,13 @@ architecture rtl of spc_apu is
 	-- captured ID666 titles (header bytes 0x2E-0x6D), 32 LE words
 	type Title_t is array (0 to 31) of std_logic_vector(15 downto 0);
 	signal TITLE_REG   : Title_t := (others => x"2020");
+
+	-- play-length tag and elapsed-time tracking
+	signal LEN_SEC      : unsigned(15 downto 0) := (others => '0');
+	signal LEN_VALID    : std_logic := '0';
+	signal SND_RDY_I    : std_logic;
+	signal SAMP_CNT     : integer range 0 to 31999 := 0;
+	signal ELAPSED      : unsigned(15 downto 0) := (others => '0');
 
 	function printable(b : std_logic_vector(7 downto 0)) return std_logic_vector is
 	begin
@@ -181,8 +193,36 @@ begin
 
 		AUDIO_L    => AUDIO_L,
 		AUDIO_R    => AUDIO_R,
-		SND_RDY    => SND_RDY
+		SND_RDY    => SND_RDY_I
 	);
+
+	SND_RDY <= SND_RDY_I;
+
+	-- elapsed-time counter and auto-advance pulse
+	process(CLK, RESET_N)
+	begin
+		if RESET_N = '0' then
+			SAMP_CNT <= 0;
+			ELAPSED  <= (others => '0');
+			ADVANCE  <= '0';
+		elsif rising_edge(CLK) then
+			ADVANCE <= '0';
+			if LSTATE /= LS_RUN then
+				SAMP_CNT <= 0;
+				ELAPSED  <= (others => '0');
+			elsif SND_RDY_I = '1' then
+				if SAMP_CNT = 31999 then
+					SAMP_CNT <= 0;
+					ELAPSED  <= ELAPSED + 1;
+					if LEN_VALID = '1' and LEN_SEC /= 0 and ELAPSED + 1 = LEN_SEC then
+						ADVANCE <= '1';
+					end if;
+				else
+					SAMP_CNT <= SAMP_CNT + 1;
+				end if;
+			end if;
+		end if;
+	end process;
 
 	-- 64KB ARAM: port A serves the DSP (which arbitrates SMP accesses),
 	-- port B belongs to the loader.
@@ -241,6 +281,11 @@ begin
 								TITLE_REG(to_integer(ADDR_U(6 downto 1) - 16#17#)) <=
 									printable(LOAD_DATA(15 downto 8)) & printable(LOAD_DATA(7 downto 0));
 							end if;
+							-- new stream: invalidate the previous length tag
+							if ADDR_U = 0 then
+								LEN_SEC   <= (others => '0');
+								LEN_VALID <= '0';
+							end if;
 						elsif ADDR_U <= x"100FF" then
 							-- 64KB ARAM image (file offset - 0x100), low byte now
 							LD_ARAM_A  <= std_logic_vector(resize(ADDR_U - x"100", 16));
@@ -256,6 +301,16 @@ begin
 							IO_ADDR <= std_logic_vector(resize(ADDR_U - x"10000", 17));
 							IO_DAT  <= LOAD_DATA;
 							IO_WR   <= '1';
+						elsif ADDR_U = x"10180" then
+							-- .spcpak play-length tag (seconds)
+							LEN_SEC <= unsigned(LOAD_DATA);
+						elsif ADDR_U = x"10182" then
+							-- magic "PL" validates the length tag
+							if LOAD_DATA = x"4C50" then
+								LEN_VALID <= '1';
+							else
+								LEN_VALID <= '0';
+							end if;
 						elsif ADDR_U >= x"101C0" and ADDR_U <= x"101FE" then
 							-- extra RAM -> ARAM $FFC0-$FFFF, low byte now
 							LD_ARAM_A  <= std_logic_vector(resize(ADDR_U - x"101C0" + x"FFC0", 16));

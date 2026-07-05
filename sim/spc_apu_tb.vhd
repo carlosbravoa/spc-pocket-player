@@ -38,6 +38,7 @@ architecture sim of spc_apu_tb is
 	signal SND_RDY     : std_logic;
 	signal PLAYING     : std_logic;
 	signal TITLE_BITS  : std_logic_vector(511 downto 0);
+	signal ADVANCE     : std_logic;
 
 	impure function title_str return string is
 		variable s : string(1 to 64);
@@ -69,8 +70,18 @@ begin
 		AUDIO_R     => AUDIO_R,
 		SND_RDY     => SND_RDY,
 		PLAYING     => PLAYING,
-		TITLE_BITS  => TITLE_BITS
+		TITLE_BITS  => TITLE_BITS,
+		ADVANCE     => ADVANCE
 	);
+
+	adv_mon : process(CLK)
+	begin
+		if rising_edge(CLK) then
+			if ADVANCE = '1' then
+				report "ADVANCE pulse at " & time'image(now);
+			end if;
+		end if;
+	end process;
 
 	stim : process
 		file f          : char_file_t;
