@@ -48,7 +48,8 @@ A = restart track, Y = shuffle on/off ("S" indicator on screen; next/auto
 picks a random other track while enabled).
 
 **Display**: track number, shuffle indicator, elapsed/total time (MM:SS),
-song + game title, stereo VU meters.
+song + game title, 8 per-voice envelope bars (one colored column per DSP
+voice), and stereo VU strips.
 
 **Fade-out**: tagged songs fade over their final 2 seconds before
 advancing.

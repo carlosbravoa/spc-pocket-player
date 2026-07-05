@@ -849,6 +849,7 @@ data_loader #(
     wire    [15:0]  apu_elapsed;
     wire    [15:0]  apu_length;
     wire    [7:0]   apu_fade;
+    wire    [87:0]  apu_voice_env;
 
 spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
@@ -868,6 +869,7 @@ spc_apu apu (
     .ADVANCE        ( apu_advance ),
     .ELAPSED_SEC    ( apu_elapsed ),
     .LENGTH_SEC     ( apu_length ),
+    .VOICE_ENV      ( apu_voice_env ),
     .FADE_LEVEL     ( apu_fade )
 );
 
@@ -915,6 +917,20 @@ always @(posedge clk_sys_21_48) begin
     end
 end
 
+// per-voice envelope peaks with decay (~4ms) for the voice bars
+    reg     [10:0]  venv_peak [0:7];
+    integer         vi;
+always @(posedge clk_sys_21_48) begin
+    if (apu_snd_rdy) begin
+        for (vi = 0; vi < 8; vi = vi + 1) begin
+            if (!audio_muted && apu_voice_env[vi*11 +: 11] > venv_peak[vi])
+                venv_peak[vi] <= apu_voice_env[vi*11 +: 11];
+            else
+                venv_peak[vi] <= venv_peak[vi] - (venv_peak[vi] >> 7);
+        end
+    end
+end
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // video generation: 512x240 active raster at 10.738635 MHz dot clock
 // 682 x 262 total -> 60.09 Hz (SNES-like timing)
@@ -954,6 +970,8 @@ assign video_hs = vidout_hs;
     reg [15:0]  elapsed_vid, length_vid;
     reg         shuffle_vid;
     reg         ever_played = 0;
+    reg [5:0]   venv_vid [0:7];
+    integer     vj;
 
     reg [23:0]  border_rgb;
 always @(*) begin
@@ -1059,6 +1077,28 @@ font_rom fnt (
 
     wire        text_px = font_bits[font_col_r];
 
+    // per-voice envelope bars: 8 columns of 64px, y 120-183, growing upward
+    wire [2:0]  vbar_v = visible_x[8:6];
+    wire [5:0]  vbar_x = visible_x[5:0];
+    wire [5:0]  vbar_h = venv_vid[vbar_v];
+    wire        vbar_on = (visible_y >= 'd120 && visible_y < 'd184) &&
+                          (vbar_x >= 'd8 && vbar_x < 'd56) &&
+                          (vbar_h != 0) &&
+                          (visible_y >= (9'd184 - {3'd0, vbar_h}));
+    reg [23:0]  vbar_rgb;
+always @(*) begin
+    case (vbar_v)
+        3'd0:    vbar_rgb = 24'hE05050;
+        3'd1:    vbar_rgb = 24'hE09040;
+        3'd2:    vbar_rgb = 24'hE0D040;
+        3'd3:    vbar_rgb = 24'h60C850;
+        3'd4:    vbar_rgb = 24'h40C0B0;
+        3'd5:    vbar_rgb = 24'h4880E0;
+        3'd6:    vbar_rgb = 24'h9060E0;
+        default: vbar_rgb = 24'hD060B0;
+    endcase
+end
+
 always @(posedge clk_video_10_74 or negedge reset_n) begin
 
     if(~reset_n) begin
@@ -1100,6 +1140,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             elapsed_vid <= apu_elapsed;
             length_vid <= apu_length;
             shuffle_vid <= shuffle_en;
+            for (vj = 0; vj < 8; vj = vj + 1)
+                venv_vid[vj] <= venv_peak[vj][10:5];
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -1142,16 +1184,19 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                         vidout_rgb <= 24'h9098A8;
                     else if (line_hint && text_px)
                         vidout_rgb <= 24'h50505C;
-                    // VU meters: L rows 144-167, R rows 184-207
-                    else if (visible_y >= 'd144 && visible_y < 'd168) begin
+                    // per-voice envelope bars, y 120-183
+                    else if (vbar_on)
+                        vidout_rgb <= vbar_rgb;
+                    else if (visible_y == 'd186)
+                        // baseline under the voice bars
+                        vidout_rgb <= 24'h202028;
+                    // thin L/R VU strips, y 192-199 / 200-207
+                    else if (visible_y >= 'd192 && visible_y < 'd200) begin
                         if (visible_x < bar_l)
                             vidout_rgb <= 24'h30C060;   // green
-                    end else if (visible_y >= 'd184 && visible_y < 'd208) begin
+                    end else if (visible_y >= 'd200 && visible_y < 'd208) begin
                         if (visible_x < bar_r)
                             vidout_rgb <= 24'h3060C0;   // blue
-                    end else if (visible_y == 'd136 || visible_y == 'd176) begin
-                        // faint separator lines
-                        vidout_rgb <= 24'h202028;
                     end
                 end
             end

@@ -42,6 +42,7 @@ architecture sim of spc_apu_tb is
 	signal ELAPSED_SEC : std_logic_vector(15 downto 0);
 	signal LENGTH_SEC  : std_logic_vector(15 downto 0);
 	signal FADE_LEVEL  : std_logic_vector(7 downto 0);
+	signal VOICE_ENV   : std_logic_vector(87 downto 0);
 
 	impure function title_str return string is
 		variable s : string(1 to 64);
@@ -77,7 +78,8 @@ begin
 		ADVANCE     => ADVANCE,
 		ELAPSED_SEC => ELAPSED_SEC,
 		LENGTH_SEC  => LENGTH_SEC,
-		FADE_LEVEL  => FADE_LEVEL
+		FADE_LEVEL  => FADE_LEVEL,
+		VOICE_ENV   => VOICE_ENV
 	);
 
 	adv_mon : process(CLK)
@@ -152,6 +154,11 @@ begin
 		wait until PLAYING = '1';
 		report "APU running";
 		report "title: [" & title_str & "]";
+
+		wait for 15 ms;
+		report "voice env: v0=" & integer'image(to_integer(unsigned(VOICE_ENV(10 downto 0))))
+			& " v1=" & integer'image(to_integer(unsigned(VOICE_ENV(21 downto 11))))
+			& " v2=" & integer'image(to_integer(unsigned(VOICE_ENV(32 downto 22))));
 
 		wait for RUN_MS * 1 ms;
 

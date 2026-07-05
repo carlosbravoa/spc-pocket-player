@@ -46,7 +46,10 @@ entity DSP is
 
 		AUDIO_L		: out std_logic_vector(15 downto 0);
 		AUDIO_R		: out std_logic_vector(15 downto 0);
-		SND_RDY		: out std_logic
+		SND_RDY		: out std_logic;
+
+		-- per-voice envelope levels (8 x 11 bits), for visualization
+		VOICE_ENV	: out std_logic_vector(87 downto 0)
 	);
 end DSP;
 
@@ -234,7 +237,12 @@ architecture rtl of DSP is
 	signal SS_REGS_DO		: std_logic_vector(7 downto 0);
 
 begin
-	
+
+	voice_env_tap : for i in 0 to 7 generate
+		VOICE_ENV(i*11+10 downto i*11) <= std_logic_vector(ENV(i)(10 downto 0)) when ENV(i)(11) = '0'
+		                                  else (others => '0');
+	end generate;
+
 	MCLK_FREQ <= MCLK_PAL_FREQ when PAL = '1' else MCLK_NTSC_FREQ;
 	ACLK_FREQ <= ACLK_REAL_FREQ when FREQ = '1' else ACLK_TYPE_FREQ;
 	CEGEN_RST_N <= RST_N and ENABLE;

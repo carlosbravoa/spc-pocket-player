@@ -51,6 +51,7 @@ entity spc_apu is
 
 		ELAPSED_SEC : out std_logic_vector(15 downto 0);
 		LENGTH_SEC  : out std_logic_vector(15 downto 0);  -- 0 when untagged
+		VOICE_ENV   : out std_logic_vector(87 downto 0);  -- 8 x 11-bit envelopes
 		-- 255 = full volume; ramps to 0 over the last 2 seconds of a
 		-- tagged song (fade-out)
 		FADE_LEVEL  : out std_logic_vector(7 downto 0)
@@ -211,7 +212,8 @@ begin
 
 		AUDIO_L    => AUDIO_L,
 		AUDIO_R    => AUDIO_R,
-		SND_RDY    => SND_RDY_I
+		SND_RDY    => SND_RDY_I,
+		VOICE_ENV  => VOICE_ENV
 	);
 
 	SND_RDY <= SND_RDY_I;
