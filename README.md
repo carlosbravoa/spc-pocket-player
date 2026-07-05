@@ -29,8 +29,22 @@ spc_apu.vhd ── loader FSM routes the file:
 SMP (SPC700) ◄──► DSP ◄──► ARAM BRAM ──► AUDIO_L/R @32kHz ──► sound_i2s (48kHz I2S)
 ```
 
-Video output is a 512×240 VU-meter visualization (green = left, blue = right)
-at 60.09 Hz, SNES-like timing from a 10.738635 MHz dot clock.
+Video output is 512×240 at 60.09 Hz (SNES-like timing, 10.738635 MHz dot
+clock): track counter, ID666 song/game title, and stereo VU meters.
+
+## Albums (.spcpak)
+
+The data slot is `deferload`: the core pulls one 0x10200-byte song at a time
+with `target_dataslot_read`, so a single file can hold a whole soundtrack.
+
+```sh
+python3 tools/make_spcpak.py ~/spc/chrono-trigger/ -o "Chrono Trigger.spcpak"
+```
+
+A plain `.spc` is just a 1-song pack — both load the same way.
+
+**Controls**: dpad right = next track, dpad left = previous track,
+A = restart track.
 
 ## Building
 
@@ -41,8 +55,8 @@ Requires Quartus Prime (Lite) with Cyclone V support.
 ```
 
 Copy the contents of `out/` onto the Pocket's SD card root, then put your
-`.spc` files in `/Assets/spc/common/`. Launch the "SPC Player" core and pick
-a file.
+`.spc`/`.spcpak` files in `/Assets/spc/common/`. Launch the "SPC Player"
+core and pick a file.
 
 ## Simulation
 

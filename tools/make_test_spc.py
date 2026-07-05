@@ -94,7 +94,7 @@ hdr[0x29] = 0x00            # Y
 hdr[0x2A] = 0x02            # PSW (Z set, arbitrary)
 hdr[0x2B] = 0xEF            # SP
 hdr[0x2E:0x2E + 20] = b"Test Tone 1kHz".ljust(20, b"\x00")   # song title
-hdr[0x42:0x42 + 20] = b"spc-pocket-player".ljust(20, b"\x00")  # game title
+hdr[0x4E:0x4E + 20] = b"spc-pocket-player".ljust(20, b"\x00")  # game title
 
 out = bytes(hdr) + bytes(aram) + bytes(dsp) + bytes(64) + bytes(aram[0xFFC0:0x10000])
 assert len(out) == 0x10200, hex(len(out))

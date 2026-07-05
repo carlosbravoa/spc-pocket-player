@@ -38,7 +38,11 @@ entity spc_apu is
 		AUDIO_L     : out std_logic_vector(15 downto 0); -- signed PCM, updates at 32 kHz
 		AUDIO_R     : out std_logic_vector(15 downto 0);
 		SND_RDY     : out std_logic;                     -- 1-cycle strobe per sample
-		PLAYING     : out std_logic
+		PLAYING     : out std_logic;
+
+		-- ID666 song title (32 chars) + game title (32 chars) from the header,
+		-- sanitized to printable ASCII. Static while PLAYING; byte 0 in bits 7:0.
+		TITLE_BITS  : out std_logic_vector(511 downto 0)
 	);
 end spc_apu;
 
@@ -79,6 +83,18 @@ architecture rtl of spc_apu is
 	-- captured $F0-$FF register page (8 little-endian words)
 	type PageF0_t is array (0 to 7) of std_logic_vector(15 downto 0);
 	signal PAGEF0      : PageF0_t;
+
+	-- captured ID666 titles (header bytes 0x2E-0x6D), 32 LE words
+	type Title_t is array (0 to 31) of std_logic_vector(15 downto 0);
+	signal TITLE_REG   : Title_t := (others => x"2020");
+
+	function printable(b : std_logic_vector(7 downto 0)) return std_logic_vector is
+	begin
+		if unsigned(b) < 16#20# or unsigned(b) > 16#7E# then
+			return x"20";
+		end if;
+		return b;
+	end function;
 
 	-- loader FSM
 	type LoadState_t is (LS_IDLE, LS_ARAM_HI, LS_REGSEQ, LS_START, LS_RUN);
@@ -188,6 +204,10 @@ begin
 
 	PLAYING <= '1' when LSTATE = LS_RUN else '0';
 
+	title_map : for i in 0 to 31 generate
+		TITLE_BITS(i*16+15 downto i*16) <= TITLE_REG(i);
+	end generate;
+
 	process(CLK, RESET_N)
 	begin
 		if RESET_N = '0' then
@@ -216,6 +236,11 @@ begin
 							IO_ADDR <= LOAD_ADDR(16 downto 0);
 							IO_DAT  <= LOAD_DATA;
 							IO_WR   <= '1';
+							-- ID666 song+game title bytes at 0x2E-0x6D
+							if ADDR_U >= x"0002E" and ADDR_U <= x"0006C" then
+								TITLE_REG(to_integer(ADDR_U(6 downto 1) - 16#17#)) <=
+									printable(LOAD_DATA(15 downto 8)) & printable(LOAD_DATA(7 downto 0));
+							end if;
 						elsif ADDR_U <= x"100FF" then
 							-- 64KB ARAM image (file offset - 0x100), low byte now
 							LD_ARAM_A  <= std_logic_vector(resize(ADDR_U - x"100", 16));

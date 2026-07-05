@@ -1,6 +1,27 @@
 {
   "input": {
     "magic": "APF_VER_1",
-    "controllers": []
+    "controllers": [
+      {
+        "type": "default",
+        "mappings": [
+          {
+            "id": 0,
+            "name": "Restart Track",
+            "key": "pad_btn_a"
+          },
+          {
+            "id": 1,
+            "name": "Next Track",
+            "key": "pad_dpad_right"
+          },
+          {
+            "id": 2,
+            "name": "Previous Track",
+            "key": "pad_dpad_left"
+          }
+        ]
+      }
+    ]
   }
 }

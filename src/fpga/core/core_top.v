@@ -379,10 +379,10 @@ end
 // bridge target commands
 // synchronous to clk_74a
 
-    reg             target_dataslot_read;
-    reg             target_dataslot_write;
-    reg             target_dataslot_getfile;    // require additional param/resp structs to be mapped
-    reg             target_dataslot_openfile;   // require additional param/resp structs to be mapped
+    reg             target_dataslot_read = 0;
+    reg             target_dataslot_write = 0;
+    reg             target_dataslot_getfile = 0;    // require additional param/resp structs to be mapped
+    reg             target_dataslot_openfile = 0;   // require additional param/resp structs to be mapped
 
     wire            target_dataslot_ack;
     wire            target_dataslot_done;
@@ -488,23 +488,162 @@ core_bridge_cmd icb (
 
 
 ////////////////////////////////////////////////////////////////////////////////////////
-// SPC download tracking (clk_74a domain)
+// Track controller (clk_74a domain)
 //
-// The .spc data slot (id 0, bridge address 0x10000000) is streamed by APF.
-// We track the download window with dataslot_requestwrite/allcomplete and
-// hand the APU a level (loading) whose falling edge marks "file complete".
+// The data slot (id 0) is marked deferload, so APF never streams it by
+// itself. This FSM reads the slot size from the data table, computes the
+// number of 0x10200-byte songs in the file (.spcpak = concatenated
+// normalized SPCs; a plain .spc is a 1-song pack), and issues
+// target_dataslot_read commands to pull one song at a time to bridge
+// address 0x10000000 - which flows through data_loader into the APU.
+//
+// Controls: dpad right = next, dpad left = prev, A = restart.
 
-    reg     spc_downloading = 0;
+    localparam SONG_BYTES = 32'h10200;
+
+    wire    [31:0]  cont1_key_s74;
+synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
+
+    reg     [31:0]  cont1_key_prev = 0;
+    wire            btn_next    = cont1_key_s74[3] & ~cont1_key_prev[3];
+    wire            btn_prev    = cont1_key_s74[2] & ~cont1_key_prev[2];
+    wire            btn_restart = cont1_key_s74[4] & ~cont1_key_prev[4];
+
+    reg             allcomplete_1 = 0;
+    reg             reset_n_1 = 0;
+
+    reg     [31:0]  pak_size = 0;
+    reg     [31:0]  count_rem;
+    reg     [9:0]   song_count = 0;
+    reg     [9:0]   song_index = 0;
+    reg     [9:0]   issue_index;
+    reg             have_pak = 0;       // slot size known
+    reg             track_loading = 0;
+
+    reg             pending_load = 0;
+    reg             pending_recount = 0;
+    reg     [9:0]   pending_index = 0;
+
+    reg     [3:0]   tkstate = 0;
+    localparam TK_IDLE     = 0;
+    localparam TK_SIZE0    = 1;
+    localparam TK_SIZE1    = 2;
+    localparam TK_SIZE1B   = 8;
+    localparam TK_SIZE2    = 3;
+    localparam TK_COUNT    = 4;
+    localparam TK_ISSUE    = 5;
+    localparam TK_ACK      = 6;
+    localparam TK_WAIT     = 7;
+
+    reg     [9:0]   datatable_addr_r = 0;
+assign datatable_addr = datatable_addr_r;
+assign datatable_wren = 0;
+assign datatable_data = 0;
+
+    wire    [31:0]  song_offset = ({22'd0, issue_index} << 16) + ({22'd0, issue_index} << 9);
 
 always @(posedge clk_74a) begin
-    if (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0)
-        spc_downloading <= 1;
-    else if (dataslot_allcomplete)
-        spc_downloading <= 0;
+    cont1_key_prev <= cont1_key_s74;
+    allcomplete_1  <= dataslot_allcomplete;
+    reset_n_1      <= reset_n;
+
+    case (tkstate)
+        TK_IDLE: begin
+            if (pending_load) begin
+                pending_load <= 0;
+                issue_index  <= pending_index;
+                if (pending_recount) begin
+                    pending_recount <= 0;
+                    tkstate <= TK_SIZE0;
+                end else begin
+                    tkstate <= TK_ISSUE;
+                end
+            end
+        end
+
+        // read slot 0 size from the data table (slot index 0 -> word 1)
+        TK_SIZE0: begin
+            datatable_addr_r <= 10'd1;
+            tkstate <= TK_SIZE1;
+        end
+        TK_SIZE1: tkstate <= TK_SIZE1B;     // datatable BRAM: registered address
+        TK_SIZE1B: tkstate <= TK_SIZE2;     // ... and registered output (2-cycle)
+        TK_SIZE2: begin
+            pak_size  <= datatable_q;
+            count_rem <= datatable_q;
+            song_count <= 0;
+            tkstate <= TK_COUNT;
+        end
+        TK_COUNT: begin
+            if (count_rem >= SONG_BYTES && song_count != 10'h3FF) begin
+                count_rem  <= count_rem - SONG_BYTES;
+                song_count <= song_count + 1'b1;
+            end else begin
+                // a trailing 0x10180-byte SPC (no extra-RAM section) counts
+                if (count_rem >= 32'h10180)
+                    song_count <= song_count + 1'b1;
+                have_pak <= 1;
+                tkstate  <= TK_ISSUE;
+            end
+        end
+
+        TK_ISSUE: begin
+            if (song_count == 0) begin
+                tkstate <= TK_IDLE;         // empty/invalid file
+            end else begin
+                song_index <= issue_index;
+                target_dataslot_id         <= 16'h0;
+                target_dataslot_slotoffset <= song_offset;
+                target_dataslot_bridgeaddr <= 32'h10000000;
+                target_dataslot_length     <=
+                    (pak_size - song_offset >= SONG_BYTES) ? SONG_BYTES
+                                                           : pak_size - song_offset;
+                target_dataslot_read <= 1;
+                track_loading <= 1;
+                tkstate <= TK_ACK;
+            end
+        end
+        TK_ACK: begin
+            if (target_dataslot_ack) begin
+                target_dataslot_read <= 0;
+                tkstate <= TK_WAIT;
+            end
+        end
+        TK_WAIT: begin
+            if (target_dataslot_done) begin
+                track_loading <= 0;
+                tkstate <= TK_IDLE;
+            end
+        end
+
+        default: tkstate <= TK_IDLE;
+    endcase
+
+    // triggers: initial load (allcomplete or reset exit), file change, buttons.
+    // placed after the FSM case so a trigger arriving in the same cycle
+    // TK_IDLE consumes the previous request is not lost (last write wins)
+    if ((dataslot_allcomplete & ~allcomplete_1) ||
+        (reset_n & ~reset_n_1) ||
+        (dataslot_update && dataslot_update_id == 16'h0)) begin
+        pending_load    <= 1;
+        pending_recount <= 1;
+        pending_index   <= 0;
+    end else if (have_pak && song_count != 0) begin
+        if (btn_next) begin
+            pending_load  <= 1;
+            pending_index <= (song_index + 1'b1 == song_count) ? 10'd0 : song_index + 1'b1;
+        end else if (btn_prev) begin
+            pending_load  <= 1;
+            pending_index <= (song_index == 0) ? song_count - 1'b1 : song_index - 1'b1;
+        end else if (btn_restart) begin
+            pending_load  <= 1;
+            pending_index <= song_index;
+        end
+    end
 end
 
     wire    spc_downloading_s;
-synch_3 s_dl(spc_downloading, spc_downloading_s, clk_sys_21_48);
+synch_3 s_dl(track_loading, spc_downloading_s, clk_sys_21_48);
 
     reg     spc_downloading_s1 = 0;
     reg     spc_load_done = 0;
@@ -556,6 +695,7 @@ data_loader #(
     wire    [15:0]  apu_audio_r;
     wire            apu_snd_rdy;
     wire            apu_playing;
+    wire    [511:0] apu_title_bits;
 
 spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
@@ -570,7 +710,8 @@ spc_apu apu (
     .AUDIO_L        ( apu_audio_l ),
     .AUDIO_R        ( apu_audio_r ),
     .SND_RDY        ( apu_snd_rdy ),
-    .PLAYING        ( apu_playing )
+    .PLAYING        ( apu_playing ),
+    .TITLE_BITS     ( apu_title_bits )
 );
 
 // mute while the Pocket menu is open
@@ -628,10 +769,67 @@ assign video_hs = vidout_hs;
     // levels resampled into the video domain once per frame (quasi-static)
     reg [14:0]  vu_l_vid, vu_r_vid;
     reg         playing_vid;
+    reg [511:0] title_vid;
+    reg [9:0]   idx_vid, cnt_vid;
 
     // bar lengths in pixels (0-511): use upper bits of the 15-bit level
     wire [8:0]  bar_l = vu_l_vid[14:6];
     wire [8:0]  bar_r = vu_r_vid[14:6];
+
+    //
+    // text overlay: 32 chars x 16px cells (8x8 font at 2x)
+    //   y 32-47:  track counter "NNN/MMM"
+    //   y 64-79:  song title
+    //   y 96-111: game title
+    //
+    wire        line_track = (visible_y[8:4] == 'd2);
+    wire        line_title = (visible_y[8:4] == 'd4);
+    wire        line_game  = (visible_y[8:4] == 'd6);
+    wire        any_text_line = line_track | line_title | line_game;
+
+    // track counter digits (from once-per-frame latched values)
+    wire [9:0]  disp_n = idx_vid + 1'b1;
+    wire [3:0]  n_d2 = disp_n / 'd100;
+    wire [3:0]  n_d1 = (disp_n / 'd10) % 'd10;
+    wire [3:0]  n_d0 = disp_n % 'd10;
+    wire [3:0]  c_d2 = cnt_vid / 'd100;
+    wire [3:0]  c_d1 = (cnt_vid / 'd10) % 'd10;
+    wire [3:0]  c_d0 = cnt_vid % 'd10;
+
+    // font lookup is registered, so address it with a 1-pixel lookahead;
+    // the whole text layer lands shifted 1px left, uniformly (invisible)
+    wire [9:0]  la_vx = x_count + 1'b1 - VID_H_BPORCH;
+    wire [4:0]  la_ci = la_vx[8:4];         // character cell 0-31
+
+    reg  [7:0]  track_ch;
+always @(*) begin
+    case (la_ci)
+        5'd12:   track_ch = (n_d2 == 0) ? 8'h20 : {4'h3, n_d2};
+        5'd13:   track_ch = (n_d2 == 0 && n_d1 == 0) ? 8'h20 : {4'h3, n_d1};
+        5'd14:   track_ch = {4'h3, n_d0};
+        5'd15:   track_ch = 8'h2F;          // '/'
+        5'd16:   track_ch = (c_d2 == 0) ? 8'h20 : {4'h3, c_d2};
+        5'd17:   track_ch = (c_d2 == 0 && c_d1 == 0) ? 8'h20 : {4'h3, c_d1};
+        5'd18:   track_ch = {4'h3, c_d0};
+        default: track_ch = 8'h20;
+    endcase
+end
+
+    wire [7:0]  font_ch = line_title ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
+                        : line_game  ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
+                        : track_ch;
+
+    wire [7:0]  font_bits;
+    reg  [2:0]  font_col_r;
+
+font_rom fnt (
+    .clk    ( clk_video_10_74 ),
+    .char   ( font_ch[6:0] ),
+    .row    ( visible_y[3:1] ),
+    .bits   ( font_bits )
+);
+
+    wire        text_px = font_bits[font_col_r];
 
 always @(posedge clk_video_10_74 or negedge reset_n) begin
 
@@ -644,6 +842,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
         vidout_de <= 0;
         vidout_vs <= 0;
         vidout_hs <= 0;
+
+        font_col_r <= la_vx[3:1];
 
         // x and y counters
         x_count <= x_count + 1'b1;
@@ -659,10 +859,13 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
         // generate sync
         if(x_count == 0 && y_count == 0) begin
             vidout_vs <= 1;
-            // latch the (asynchronous) VU levels once per frame, during blank
+            // latch the (asynchronous) status once per frame, during blank
             vu_l_vid <= vu_level_l;
             vu_r_vid <= vu_level_r;
             playing_vid <= apu_playing;
+            title_vid <= apu_title_bits;
+            idx_vid <= song_index;
+            cnt_vid <= song_count;
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -688,15 +891,21 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= 24'h802020;
                 end else begin
-                    // VU meters: L bar rows 88-111, R bar rows 128-151
-                    if (visible_y >= 'd88 && visible_y < 'd112) begin
+                    if (line_track && text_px)
+                        vidout_rgb <= 24'h70D080;
+                    else if (line_title && text_px)
+                        vidout_rgb <= 24'hF0F0F0;
+                    else if (line_game && text_px)
+                        vidout_rgb <= 24'h9098A8;
+                    // VU meters: L rows 144-167, R rows 184-207
+                    else if (visible_y >= 'd144 && visible_y < 'd168) begin
                         if (visible_x < bar_l)
                             vidout_rgb <= 24'h30C060;   // green
-                    end else if (visible_y >= 'd128 && visible_y < 'd152) begin
+                    end else if (visible_y >= 'd184 && visible_y < 'd208) begin
                         if (visible_x < bar_r)
                             vidout_rgb <= 24'h3060C0;   // blue
-                    end else if (visible_y == 'd80 || visible_y == 'd119 ||
-                                 visible_y == 'd160) begin
+                    end else if (visible_y == 'd136 || visible_y == 'd176 ||
+                                 visible_y == 'd216) begin
                         // faint separator lines
                         vidout_rgb <= 24'h202028;
                     end

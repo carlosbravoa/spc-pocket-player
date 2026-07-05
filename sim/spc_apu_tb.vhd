@@ -37,6 +37,16 @@ architecture sim of spc_apu_tb is
 	signal AUDIO_R     : std_logic_vector(15 downto 0);
 	signal SND_RDY     : std_logic;
 	signal PLAYING     : std_logic;
+	signal TITLE_BITS  : std_logic_vector(511 downto 0);
+
+	impure function title_str return string is
+		variable s : string(1 to 64);
+	begin
+		for i in 0 to 63 loop
+			s(i + 1) := character'val(to_integer(unsigned(TITLE_BITS(i*8+7 downto i*8))));
+		end loop;
+		return s;
+	end function;
 
 	signal sim_done    : boolean := false;
 
@@ -58,7 +68,8 @@ begin
 		AUDIO_L     => AUDIO_L,
 		AUDIO_R     => AUDIO_R,
 		SND_RDY     => SND_RDY,
-		PLAYING     => PLAYING
+		PLAYING     => PLAYING,
+		TITLE_BITS  => TITLE_BITS
 	);
 
 	stim : process
@@ -116,6 +127,7 @@ begin
 
 		wait until PLAYING = '1';
 		report "APU running";
+		report "title: [" & title_str & "]";
 
 		wait for RUN_MS * 1 ms;
 

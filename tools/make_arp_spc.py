@@ -101,7 +101,7 @@ hdr[0x29] = 0x00
 hdr[0x2A] = 0x02
 hdr[0x2B] = 0xEF
 hdr[0x2E:0x2E + 20] = b"Arp+Echo Test".ljust(20, b"\x00")
-hdr[0x42:0x42 + 20] = b"spc-pocket-player".ljust(20, b"\x00")
+hdr[0x4E:0x4E + 20] = b"spc-pocket-player".ljust(20, b"\x00")
 
 out = bytes(hdr) + bytes(aram) + bytes(dsp) + bytes(64) + bytes(aram[0xFFC0:0x10000])
 assert len(out) == 0x10200
