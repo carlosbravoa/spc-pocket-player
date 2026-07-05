@@ -58,10 +58,15 @@ advancing.
 into the entry; the core moves to the next track when the time is up. Plain
 `.spc` files loaded directly loop forever.
 
-**Status border** (shown only before the first song plays, or on a
-persistent error): red = waiting for a file, orange = loading, magenta =
-file read failed (the core retries automatically ~10 times first). Track
-changes keep the normal UI on screen.
+**Status indicators**: a full border is shown only before the first song
+plays (red = waiting for a file, orange = loading, magenta = read failed
+after ~10 automatic retries). After that, a small square in the top-right
+corner shows the same colors whenever playback is stopped; track changes
+keep the normal UI on screen.
+
+**File changes**: after picking a new file the core waits ~0.5s before
+reading it (APF needs time to swap files), and the command channel has a
+watchdog so a misbehaving transfer can never require a core reboot.
 
 **Echo-buffer hygiene**: many SPC dumps carry garbage in the echo buffer
 region, audible as a noise burst with an echo tail at song start. The

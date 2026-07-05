@@ -542,6 +542,13 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_WAIT     = 7;
     localparam TK_RETRY    = 9;
     localparam TK_RAND     = 10;
+    localparam TK_DEFER    = 11;
+    localparam TK_DONE     = 12;
+
+    // wait ~450ms after a file change before touching the slot - reads
+    // issued while APF is still swapping files never complete
+    reg     [24:0]  defer_timer = 0;
+    reg             load_ok = 0;
 
     // retry management: heals boot-time races where the data table is not
     // yet populated, and read errors (with a shorter fallback length that
@@ -575,7 +582,8 @@ always @(posedge clk_74a) begin
                 if (pending_recount) begin
                     pending_recount <= 0;
                     pending_random  <= 0;
-                    tkstate <= TK_SIZE0;
+                    defer_timer <= 0;
+                    tkstate <= TK_DEFER;
                 end else if (pending_random) begin
                     pending_random <= 0;
                     rand_rem <= lfsr;
@@ -584,6 +592,12 @@ always @(posedge clk_74a) begin
                     tkstate <= TK_ISSUE;
                 end
             end
+        end
+
+        TK_DEFER: begin
+            defer_timer <= defer_timer + 1'b1;
+            if (&defer_timer)
+                tkstate <= TK_SIZE0;
         end
 
         TK_RAND: begin
@@ -647,6 +661,7 @@ always @(posedge clk_74a) begin
                     : (pak_size - song_offset - 32'd2);
                 target_dataslot_read <= 1;
                 track_loading <= 1;
+                load_ok <= 0;
                 retry_timer <= 0;
                 tkstate <= TK_ACK;
             end
@@ -658,15 +673,14 @@ always @(posedge clk_74a) begin
             // from a previous command has been cleared (a few cycles)
             if (target_dataslot_done && retry_timer > 24'd16) begin
                 target_dataslot_read <= 0;
-                track_loading <= 0;
                 if (target_dataslot_err != 0) begin
+                    track_loading <= 0;
                     short_read <= 1;
                     retry_timer <= 0;
                     tkstate <= TK_RETRY;
                 end else begin
-                    retry_cnt  <= 0;
-                    load_error <= 0;
-                    tkstate <= TK_IDLE;
+                    load_ok <= 1;
+                    tkstate <= TK_DONE;
                 end
             end else if (target_dataslot_ack) begin
                 target_dataslot_read <= 0;
@@ -682,15 +696,14 @@ always @(posedge clk_74a) begin
         TK_WAIT: begin
             retry_timer <= retry_timer + 1'b1;
             if (target_dataslot_done) begin
-                track_loading <= 0;
                 if (target_dataslot_err != 0) begin
+                    track_loading <= 0;
                     short_read <= 1;        // next attempt avoids the EOF edge
                     retry_timer <= 0;
                     tkstate <= TK_RETRY;
                 end else begin
-                    retry_cnt  <= 0;
-                    load_error <= 0;
-                    tkstate <= TK_IDLE;
+                    load_ok <= 1;
+                    tkstate <= TK_DONE;
                 end
             end else if (&retry_timer) begin
                 // watchdog: transfer never completed - abort and retry
@@ -698,6 +711,14 @@ always @(posedge clk_74a) begin
                 short_read <= 1;
                 tkstate <= TK_RETRY;
             end
+        end
+        TK_DONE: begin
+            // load_ok is set one cycle before track_loading falls so the
+            // sys-domain LOAD_DONE gate samples it reliably
+            track_loading <= 0;
+            retry_cnt  <= 0;
+            load_error <= 0;
+            tkstate <= TK_IDLE;
         end
 
         TK_RETRY: begin
@@ -768,11 +789,16 @@ synch_3 s_adv(apu_adv_toggle, adv_toggle_s, clk_74a);
     wire    spc_downloading_s;
 synch_3 s_dl(track_loading, spc_downloading_s, clk_sys_21_48);
 
+    wire    load_ok_s;
+synch_3 s_lok(load_ok, load_ok_s, clk_sys_21_48);
+
     reg     spc_downloading_s1 = 0;
     reg     spc_load_done = 0;
 always @(posedge clk_sys_21_48) begin
     spc_downloading_s1 <= spc_downloading_s;
-    spc_load_done <= spc_downloading_s1 & ~spc_downloading_s;   // falling edge
+    // only start the APU when the transfer actually succeeded - a failed
+    // load must not replay stale data
+    spc_load_done <= spc_downloading_s1 & ~spc_downloading_s & load_ok_s;
 end
 
     // NOTE: the APU is deliberately NOT reset by reset_n. APF streams the
@@ -1103,7 +1129,12 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
                 end else begin
-                    if (line_track && text_px)
+                    if (!playing_vid && visible_x >= 'd498 && visible_x < 'd506 &&
+                        visible_y >= 'd4 && visible_y < 'd12)
+                        // small status square while not playing:
+                        // orange = loading, magenta = error, red = waiting
+                        vidout_rgb <= border_rgb;
+                    else if (line_track && text_px)
                         vidout_rgb <= 24'h70D080;
                     else if (line_title && text_px)
                         vidout_rgb <= 24'hF0F0F0;

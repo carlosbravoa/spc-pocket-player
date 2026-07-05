@@ -178,6 +178,7 @@ localparam  [3:0]   TARG_ST_DATASLOTOP  = 'd2;
 localparam  [3:0]   TARG_ST_WAITRESULT_RTR  = 'd14;
 localparam  [3:0]   TARG_ST_WAITRESULT_DSO  = 'd15;
     reg     [3:0]   tstate;
+    reg     [27:0]  tdog;
     
     reg             status_setup_done_1, status_setup_done_queue;
     reg             target_dataslot_read_1, target_dataslot_read_queue;
@@ -528,9 +529,10 @@ always @(posedge clk) begin
     end
     TARG_ST_DATASLOTOP: begin
         target_0[31:16] <= 16'h636D;
-        
+
         target_dataslot_done <= 0;
         target_dataslot_err <= 0;
+        tdog <= 0;
         tstate <= TARG_ST_WAITRESULT_DSO;
     end
     TARG_ST_WAITRESULT_DSO: begin
@@ -542,6 +544,15 @@ always @(posedge clk) begin
             // save result code
             target_dataslot_err <= target_0[2:0];
             // assert done
+            target_dataslot_done <= 1;
+            tstate <= TARG_ST_IDLE;
+        end
+        // watchdog: if APF never answers (e.g. command issued while it was
+        // busy swapping files), release the channel instead of hanging every
+        // future target command until reboot
+        tdog <= tdog + 1'b1;
+        if (tdog[27]) begin     // ~1.8s at 74.25MHz
+            target_dataslot_err <= 3'h7;
             target_dataslot_done <= 1;
             tstate <= TARG_ST_IDLE;
         end
