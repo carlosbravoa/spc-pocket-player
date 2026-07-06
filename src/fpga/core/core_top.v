@@ -554,7 +554,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     // yet populated, and read errors (with a shorter fallback length that
     // avoids reading up to the exact end-of-file)
     reg     [23:0]  retry_timer = 0;
-    reg     [3:0]   retry_cnt = 0;
+    reg     [5:0]   retry_cnt = 0;
     reg             short_read = 0;     // fallback: skip the extra-RAM tail
     reg             load_error = 0;     // sticky: retries exhausted
 
@@ -725,7 +725,9 @@ always @(posedge clk_74a) begin
             // wait ~220ms, then re-run the whole flow (size + count + load)
             retry_timer <= retry_timer + 1'b1;
             if (&retry_timer) begin
-                if (retry_cnt == 4'd10) begin
+                if (retry_cnt == 6'd60) begin
+                    // ~30-45s of patience: outlasts APF streaming a large
+                    // pack after a file re-pick
                     load_error <= 1;        // give up until the user acts
                     tkstate <= TK_IDLE;
                 end else begin
@@ -748,7 +750,8 @@ always @(posedge clk_74a) begin
     adv_toggle_1 <= adv_toggle_s;
     if ((dataslot_allcomplete & ~allcomplete_1) ||
         (reset_n & ~reset_n_1) ||
-        (dataslot_update && dataslot_update_id == 16'h0)) begin
+        (dataslot_update && dataslot_update_id == 16'h0) ||
+        (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0)) begin
         pending_load    <= 1;
         pending_recount <= 1;
         pending_random  <= 0;
@@ -855,8 +858,10 @@ spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
     .RESET_N        ( pll_locked_sys ),
 
+    // loader writes only pass while a read WE commanded is in flight -
+    // APF's own re-pick streaming must not touch the APU
     .LOAD_ACTIVE    ( spc_downloading_s ),
-    .LOAD_WR        ( loader_wr ),
+    .LOAD_WR        ( loader_wr & spc_downloading_s ),
     .LOAD_ADDR      ( loader_addr ),
     .LOAD_DATA      ( loader_data ),
     .LOAD_DONE      ( spc_load_done ),

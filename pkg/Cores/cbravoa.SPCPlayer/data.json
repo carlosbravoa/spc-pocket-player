@@ -10,7 +10,7 @@
         "deferload": true,
         "extensions": ["spc", "spcpak"],
         "size_maximum": "0x8000000",
-        "address": "0x10000000"
+        "address": "0x30000000"
       }
     ]
   }

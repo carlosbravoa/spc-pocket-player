@@ -381,6 +381,9 @@ always @(posedge clk) begin
         end
         16'h008A: begin
             // Data slot update (sent on deferload marked slots only)
+            // re-arm the allcomplete edge so a following 0x008F retriggers
+            // the core's load flow after a mid-session file change
+            dataslot_allcomplete <= 0;
             dataslot_update <= 1;
             dataslot_update_id <= host_20[15:0];
             dataslot_update_size <= host_24;
