@@ -316,10 +316,27 @@ always @(*) begin
     default: begin
         bridge_rd_data <= 0;
     end
+    32'hF0xxxxxx: begin
+        bridge_rd_data <= fbuf_q;       // getfile/openfile struct buffer
+    end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
     end
     endcase
+end
+
+// filename struct buffer for target getfile/openfile (0x108 bytes):
+// path[256] at 0x0, flags at 0x100, size at 0x104 (kept zero - plain open)
+    reg     [31:0]  fbuf [0:65];
+    reg     [31:0]  fbuf_q;
+    integer         fi;
+initial begin
+    for (fi = 0; fi < 66; fi = fi + 1) fbuf[fi] = 0;
+end
+always @(posedge clk_74a) begin
+    fbuf_q <= fbuf[bridge_addr[9:2]];
+    if (bridge_wr && bridge_addr[31:24] == 8'hF0 && bridge_addr[9:2] < 8'd64)
+        fbuf[bridge_addr[9:2]] <= bridge_wr_data;
 end
 
 
@@ -393,8 +410,8 @@ end
     reg     [31:0]  target_dataslot_bridgeaddr;
     reg     [31:0]  target_dataslot_length;
 
-    wire    [31:0]  target_buffer_param_struct; // to be mapped/implemented when using some Target commands
-    wire    [31:0]  target_buffer_resp_struct;  // to be mapped/implemented when using some Target commands
+    wire    [31:0]  target_buffer_param_struct = 32'hF0000000; // openfile reads path from fbuf
+    wire    [31:0]  target_buffer_resp_struct  = 32'hF0000000; // getfile writes path into fbuf
 
 // bridge data slot access
 // synchronous to clk_74a
@@ -530,7 +547,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     reg             pending_recount = 0;
     reg     [9:0]   pending_index = 0;
 
-    reg     [3:0]   tkstate = 0;
+    reg     [4:0]   tkstate = 0;
     localparam TK_IDLE     = 0;
     localparam TK_SIZE0    = 1;
     localparam TK_SIZE1    = 2;
@@ -544,6 +561,10 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_RAND     = 10;
     localparam TK_DEFER    = 11;
     localparam TK_DONE     = 12;
+    localparam TK_GETFILE  = 13;
+    localparam TK_GF_WAIT  = 14;
+    localparam TK_OPENFILE = 15;
+    localparam TK_OF_WAIT  = 16;
 
     // wait ~450ms after a file change before touching the slot - reads
     // issued while APF is still swapping files never complete
@@ -597,7 +618,57 @@ always @(posedge clk_74a) begin
         TK_DEFER: begin
             defer_timer <= defer_timer + 1'b1;
             if (&defer_timer)
-                tkstate <= TK_SIZE0;
+                tkstate <= TK_GETFILE;
+        end
+
+        // getfile -> openfile: ask APF for the slot's (possibly just
+        // changed) filename, then force a FRESH file handle. Without this,
+        // reads after a mid-session file change never complete.
+        TK_GETFILE: begin
+            target_dataslot_id      <= 16'h0;
+            target_dataslot_getfile <= 1;
+            retry_timer <= 0;
+            tkstate <= TK_GF_WAIT;
+        end
+        TK_GF_WAIT: begin
+            retry_timer <= retry_timer + 1'b1;
+            if (target_dataslot_done && retry_timer > 24'd16) begin
+                target_dataslot_getfile <= 0;
+                if (target_dataslot_err == 0) begin
+                    tkstate <= TK_OPENFILE;
+                end else begin
+                    retry_timer <= 0;
+                    tkstate <= TK_RETRY;
+                end
+            end else if (target_dataslot_ack) begin
+                target_dataslot_getfile <= 0;
+            end else if (&retry_timer) begin
+                target_dataslot_getfile <= 0;
+                tkstate <= TK_RETRY;
+            end
+        end
+        TK_OPENFILE: begin
+            target_dataslot_id       <= 16'h0;
+            target_dataslot_openfile <= 1;
+            retry_timer <= 0;
+            tkstate <= TK_OF_WAIT;
+        end
+        TK_OF_WAIT: begin
+            retry_timer <= retry_timer + 1'b1;
+            if (target_dataslot_done && retry_timer > 24'd16) begin
+                target_dataslot_openfile <= 0;
+                if (target_dataslot_err <= 3'd1) begin   // 0=opened, 1=created
+                    tkstate <= TK_SIZE0;
+                end else begin
+                    retry_timer <= 0;
+                    tkstate <= TK_RETRY;
+                end
+            end else if (target_dataslot_ack) begin
+                target_dataslot_openfile <= 0;
+            end else if (&retry_timer) begin
+                target_dataslot_openfile <= 0;
+                tkstate <= TK_RETRY;
+            end
         end
 
         TK_RAND: begin
@@ -725,9 +796,7 @@ always @(posedge clk_74a) begin
             // wait ~220ms, then re-run the whole flow (size + count + load)
             retry_timer <= retry_timer + 1'b1;
             if (&retry_timer) begin
-                if (retry_cnt == 6'd60) begin
-                    // ~30-45s of patience: outlasts APF streaming a large
-                    // pack after a file re-pick
+                if (retry_cnt == 6'd8) begin
                     load_error <= 1;        // give up until the user acts
                     tkstate <= TK_IDLE;
                 end else begin
