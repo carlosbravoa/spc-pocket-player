@@ -24,6 +24,16 @@
             "id": 3,
             "name": "Shuffle On/Off",
             "key": "pad_btn_y"
+          },
+          {
+            "id": 4,
+            "name": "Previous Album",
+            "key": "pad_trig_l"
+          },
+          {
+            "id": 5,
+            "name": "Next Album",
+            "key": "pad_trig_r"
           }
         ]
       }

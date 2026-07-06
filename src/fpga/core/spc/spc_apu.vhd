@@ -106,8 +106,8 @@ architecture rtl of spc_apu is
 	signal SND_RDY_I    : std_logic;
 	signal AUDIO_L_I    : std_logic_vector(15 downto 0);
 	signal AUDIO_R_I    : std_logic_vector(15 downto 0);
-	-- end-of-song detection: 5s of continuous silence advances the track
-	signal QUIET_CNT    : integer range 0 to 159999 := 0;
+	-- end-of-song detection: 4s of continuous silence advances the track
+	signal QUIET_CNT    : integer range 0 to 127999 := 0;
 	signal SAMP_CNT     : integer range 0 to 31999 := 0;
 	signal ELAPSED      : unsigned(15 downto 0) := (others => '0');
 	signal FADE_LVL     : unsigned(7 downto 0) := (others => '1');
@@ -247,10 +247,10 @@ begin
 				FADE_CNT <= 0;
 				QUIET_CNT <= 0;
 			elsif SND_RDY_I = '1' then
-				-- end-of-song: both channels essentially silent for 5s
+				-- end-of-song: both channels essentially silent for 4s
 				if signed(AUDIO_L_I) < 64 and signed(AUDIO_L_I) > -64 and
 				   signed(AUDIO_R_I) < 64 and signed(AUDIO_R_I) > -64 then
-					if QUIET_CNT = 159999 then
+					if QUIET_CNT = 127999 then
 						QUIET_CNT <= 0;
 						ADVANCE   <= '1';
 					else

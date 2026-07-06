@@ -43,9 +43,20 @@ python3 tools/make_spcpak.py ~/spc/chrono-trigger/ -o "Chrono Trigger.spcpak"
 
 A plain `.spc` is just a 1-song pack — both load the same way.
 
+**Library packs**: pack your entire collection into one indexed file (one
+album per folder) and never touch the file browser again:
+
+```sh
+./tools/pack_all.sh ~/spc /media/sd/Assets/spc/common --library
+```
+
+L1/R1 jump between albums. Packs made by older tool versions (no index)
+still play as a single album.
+
 **Controls**: dpad right = next track, dpad left = previous track,
 A = restart track, Y = shuffle on/off ("S" indicator on screen; next/auto
-picks a random other track while enabled).
+picks a random other track while enabled), L1/R1 = previous/next album
+(indexed packs).
 
 **Display**: track number, shuffle indicator, elapsed/total time (MM:SS),
 song + game title, 8 per-voice envelope bars (one colored column per DSP
@@ -99,6 +110,42 @@ python3 tools/raw_to_wav.py sim/work/audio_out.raw # convert + analyze
 
 The testbench streams the real .spc file through the same loader interface
 the Pocket uses and dumps every 32 kHz sample pair to `sim/work/audio_out.raw`.
+
+## Current limitations
+
+**Changing files mid-session does not work — pack a library instead.**
+This core streams songs on demand from a `deferload` data slot using APF's
+`target_dataslot_read`. That works perfectly for the file selected at core
+launch, but the Pocket firmware does not properly support *replacing* the
+file afterwards: after picking a new file from the menu, the slot's size is
+updated but every subsequent read silently never completes (tested across
+firmware versions). The documented remedies don't work either — the
+`getfile` (0x0190) and `openfile` (0x0192) target commands complete with
+success codes but never actually deliver the filename struct (verified at
+two different buffer addresses; no shipping core uses these commands, and
+the PC Engine CD core — the other user of deferload — simply displays an
+error on file changes).
+
+The practical answers, in order of preference:
+
+1. **Pack your whole collection into one indexed library pack**
+   (`pack_all.sh <root> --library`) and never touch the file browser again:
+   L1/R1 jump between albums, shuffle and auto-advance work across
+   everything.
+2. To switch to a different file, **quit and relaunch the core** (a few
+   seconds) — the launch-time load path is fully reliable.
+
+Other limitations:
+
+- Extended ID666 (xid6) tags are ignored; play lengths come from the
+  standard header tags (or `--default-length` at pack time).
+- Audio is sample-and-held from the DSP's native 32kHz to the Pocket's
+  48kHz I2S (same approach as the SNES core).
+- The DSP register snapshot restores what the .spc format captures; voices
+  keyed on at dump time restart from their sample beginnings (a format
+  limitation shared by all SPC players).
+- Packs created by tool versions before the index/length features still
+  play, as a single album without auto-advance.
 
 ## Licenses
 

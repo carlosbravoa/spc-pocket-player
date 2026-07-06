@@ -26,7 +26,24 @@ ap.add_argument("inputs", nargs="+", help=".spc files and/or folders")
 ap.add_argument("-o", "--output", default=None)
 ap.add_argument("--default-length", type=int, default=180, metavar="SECONDS",
                 help="play length for untagged songs (0 = loop forever, default 180)")
+ap.add_argument("--no-index", action="store_true",
+                help="legacy raw pack without the index entry")
 args = ap.parse_args()
+
+
+def build_index(albums):
+    """Index entry (0x10200 bytes): magic, counts, album start table, names."""
+    idx = bytearray(ENTRY)
+    idx[0:8] = b"SPCPAKIX"
+    total = sum(n for n, _ in albums)
+    struct.pack_into("<HH", idx, 0x8, total, len(albums))
+    start = 0
+    for a, (ntracks, name) in enumerate(albums[:256]):
+        struct.pack_into("<H", idx, 0x10 + a * 2, start)
+        nm = name.encode("latin1", "replace")[:32]
+        idx[0x210 + a * 32:0x210 + a * 32 + len(nm)] = nm
+        start += ntracks
+    return idx
 
 
 def id666_length(d):
@@ -53,14 +70,21 @@ def id666_length(d):
         return None
     return min(0xFFFE, sec + (fade_ms + 999) // 1000)
 
-files = []
+# group into albums: each folder = one album; loose files = one album
+albums_in = []          # list of (album_name, [files])
+loose = []
 for inp in args.inputs:
     p = Path(inp)
     if p.is_dir():
-        files += sorted(p.glob("*.spc")) + sorted(p.glob("*.SPC"))
+        spcs = sorted(p.glob("*.spc")) + sorted(p.glob("*.SPC"))
+        if spcs:
+            albums_in.append((p.resolve().name, spcs))
     else:
-        files.append(p)
+        loose.append(p)
+if loose:
+    albums_in.append((loose[0].stem if len(loose) == 1 else "Singles", loose))
 
+files = [f for _, fs in albums_in for f in fs]
 if not files:
     sys.exit("no .spc files found")
 
@@ -72,28 +96,40 @@ else:
     out = Path("album.spcpak")
 
 blob = bytearray()
-for f in files:
-    d = open(f, "rb").read()
-    if d[:27] != b"SNES-SPC700 Sound File Data":
-        print(f"  skipping {f.name}: not an SPC file")
-        continue
-    if len(d) < 0x10180:
-        print(f"  skipping {f.name}: truncated file ({len(d):#x} bytes)")
-        continue
-    entry = bytearray(d[:ENTRY])
-    entry += bytes(ENTRY - len(entry))
-    title = entry[0x2E:0x4E].split(b"\x00")[0].decode("latin1", "replace")
-    length = id666_length(d)
-    if length is None:
-        length = args.default_length
-    if length > 0:
-        struct.pack_into("<HH", entry, 0x10180, length, 0x4C50)   # "PL"
-        length_txt = f"{length//60}:{length%60:02d}"
-    else:
-        struct.pack_into("<HH", entry, 0x10180, 0, 0)
-        length_txt = "loop"
-    print(f"  [{len(blob)//ENTRY + 1:3d}] {f.name:40s} {length_txt:>6s}  {title}")
-    blob += entry
+album_meta = []         # (track_count, name) per album, in emitted order
+for album_name, album_files in albums_in:
+    ntracks = 0
+    print(f"== {album_name} ==")
+    for f in album_files:
+        d = open(f, "rb").read()
+        if d[:27] != b"SNES-SPC700 Sound File Data":
+            print(f"  skipping {f.name}: not an SPC file")
+            continue
+        if len(d) < 0x10180:
+            print(f"  skipping {f.name}: truncated file ({len(d):#x} bytes)")
+            continue
+        entry = bytearray(d[:ENTRY])
+        entry += bytes(ENTRY - len(entry))
+        title = entry[0x2E:0x4E].split(b"\x00")[0].decode("latin1", "replace")
+        length = id666_length(d)
+        if length is None:
+            length = args.default_length
+        if length > 0:
+            struct.pack_into("<HH", entry, 0x10180, length, 0x4C50)   # "PL"
+            length_txt = f"{length//60}:{length%60:02d}"
+        else:
+            struct.pack_into("<HH", entry, 0x10180, 0, 0)
+            length_txt = "loop"
+        print(f"  [{len(blob)//ENTRY + 1:3d}] {f.name:40s} {length_txt:>6s}  {title}")
+        blob += entry
+        ntracks += 1
+    if ntracks:
+        album_meta.append((ntracks, album_name))
 
+if not args.no_index and album_meta:
+    blob = build_index(album_meta) + blob
+
+nsongs = sum(n for n, _ in album_meta)
 open(out, "wb").write(blob)
-print(f"wrote {out}: {len(blob)//ENTRY} songs, {len(blob)} bytes")
+print(f"wrote {out}: {nsongs} songs in {len(album_meta)} album(s), {len(blob)} bytes"
+      + ("" if args.no_index else " (indexed)"))

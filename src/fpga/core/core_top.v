@@ -526,6 +526,8 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     wire            btn_prev    = cont1_key_s74[2] & ~cont1_key_prev[2];
     wire            btn_restart = cont1_key_s74[4] & ~cont1_key_prev[4];
     wire            btn_shuffle = cont1_key_s74[7] & ~cont1_key_prev[7];   // Y
+    wire            btn_alb_prev = cont1_key_s74[8] & ~cont1_key_prev[8];  // L1
+    wire            btn_alb_next = cont1_key_s74[9] & ~cont1_key_prev[9];  // R1
 
     reg             shuffle_en = 0;
     reg     [15:0]  lfsr = 16'hACE1;
@@ -566,11 +568,67 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_GF_WAIT  = 14;
     localparam TK_OPENFILE = 15;
     localparam TK_OF_WAIT  = 16;
+    localparam TK_IDX_ISSUE = 17;
+    localparam TK_IDX_EVAL  = 18;
+    localparam TK_ALB0     = 20;
+    localparam TK_ALB1     = 21;
+    localparam TK_ALB2     = 22;
+    localparam TK_ALB3     = 23;
+    localparam TK_ALB4     = 24;
+    localparam TK_ALB5     = 25;
+
+    reg             probing = 0;
+    reg             pending_album = 0;
+    reg             album_dir = 0;
+    reg     [8:0]   cur_alb;
 
     // wait ~450ms after a file change before touching the slot - reads
     // issued while APF is still swapping files never complete
     reg     [24:0]  defer_timer = 0;
     reg             load_ok = 0;
+
+    // .spcpak index (entry 0 when magic "SPCPAKIX" present):
+    // u16 track_count @0x8, u16 album_count @0xA, u16 album_start[256] @0x10.
+    // Captured from raw bridge writes during the index probe read, entirely
+    // in this clock domain.
+    reg             index_loading = 0;
+    reg             idx_magic1 = 0, idx_magic2 = 0;
+    reg     [15:0]  idx_tracks = 0;
+    reg     [15:0]  idx_albums = 0;
+    reg             pak_indexed = 0;
+    reg     [31:0]  astart_ram [0:127];    // raw index words 0x10-0x20F
+    reg     [31:0]  astart_q;
+    wire            idx_bwr = bridge_wr && bridge_addr[31:28] == 4'h1 && index_loading;
+
+    reg             index_loading_1 = 0;
+always @(posedge clk_74a) begin
+    index_loading_1 <= index_loading;
+    if (index_loading & ~index_loading_1) begin
+        // probe starting: forget the previous file's index
+        idx_magic1 <= 0;
+        idx_magic2 <= 0;
+    end else if (idx_bwr) begin
+        case (bridge_addr[16:0])
+            17'h0: idx_magic1 <= (bridge_wr_data == "SPCP");
+            17'h4: idx_magic2 <= (bridge_wr_data == "AKIX");
+            17'h8: begin
+                // little-endian u16s inside a big-endian bridge word
+                idx_tracks <= {bridge_wr_data[23:16], bridge_wr_data[31:24]};
+                idx_albums <= {bridge_wr_data[7:0],   bridge_wr_data[15:8]};
+            end
+            default: ;
+        endcase
+    end
+    if (idx_bwr && bridge_addr[16:0] >= 17'h10 && bridge_addr[16:0] < 17'h210)
+        astart_ram[bridge_addr[9:2] - 8'd4] <= bridge_wr_data;
+    astart_q <= astart_ram[alb_scan[8:1]];
+end
+
+    // album_start[a]: even entries in the word's high half, odd in the low,
+    // each little-endian
+    reg     [8:0]   alb_scan;
+    wire    [15:0]  astart_val = alb_scan[0] ? {astart_q[7:0],   astart_q[15:8]}
+                                             : {astart_q[23:16], astart_q[31:24]};
 
     // retry management: heals boot-time races where the data table is not
     // yet populated, and read errors (with a shorter fallback length that
@@ -585,7 +643,9 @@ assign datatable_addr = datatable_addr_r;
 assign datatable_wren = 0;
 assign datatable_data = 0;
 
-    wire    [31:0]  song_offset = ({22'd0, issue_index} << 16) + ({22'd0, issue_index} << 9);
+    // indexed packs: entry 0 is the index, songs shift up by one
+    wire    [10:0]  eff_index   = {1'b0, issue_index} + {10'd0, pak_indexed};
+    wire    [31:0]  song_offset = ({21'd0, eff_index} << 16) + ({21'd0, eff_index} << 9);
 
 always @(posedge clk_74a) begin
     cont1_key_prev <= cont1_key_s74;
@@ -598,7 +658,10 @@ always @(posedge clk_74a) begin
 
     case (tkstate)
         TK_IDLE: begin
-            if (pending_load) begin
+            if (pending_album) begin
+                pending_album <= 0;
+                tkstate <= TK_ALB0;
+            end else if (pending_load) begin
                 pending_load <= 0;
                 issue_index  <= pending_index;
                 if (pending_recount) begin
@@ -714,8 +777,78 @@ always @(posedge clk_74a) begin
                 if (count_rem >= 32'h10180)
                     song_count <= song_count + 1'b1;
                 have_pak <= 1;
-                tkstate  <= TK_ISSUE;
+                tkstate  <= TK_IDX_ISSUE;
             end
+        end
+
+        // probe entry 0 for the "SPCPAKIX" index (captured from the raw
+        // bridge stream; the APU loader is gated off during this read)
+        TK_IDX_ISSUE: begin
+            if (song_count == 0) begin
+                retry_timer <= 0;
+                tkstate <= TK_RETRY;
+            end else begin
+                index_loading <= 1;
+                probing <= 1;
+                pak_indexed <= 0;
+                target_dataslot_id         <= 16'h0;
+                target_dataslot_slotoffset <= 32'd0;
+                target_dataslot_bridgeaddr <= 32'h10000000;
+                target_dataslot_length     <=
+                    (pak_size > SONG_BYTES) ? SONG_BYTES : (pak_size - 32'd2);
+                target_dataslot_read <= 1;
+                track_loading <= 1;
+                load_ok <= 0;
+                retry_timer <= 0;
+                tkstate <= TK_ACK;
+            end
+        end
+        TK_IDX_EVAL: begin
+            index_loading <= 0;
+            probing <= 0;
+            track_loading <= 0;
+            if (idx_magic1 && idx_magic2) begin
+                pak_indexed <= 1;
+                // songs = entries minus the index, clamped to the count
+                // the index itself declares
+                if ({6'd0, idx_tracks[9:0]} == idx_tracks &&
+                    idx_tracks[9:0] < song_count - 1'b1)
+                    song_count <= idx_tracks[9:0];
+                else
+                    song_count <= song_count - 1'b1;
+            end
+            tkstate <= TK_ISSUE;
+        end
+
+        // album jump (L1/R1): scan album_start for the current album, then
+        // load the first track of the neighbor
+        TK_ALB0: begin
+            alb_scan <= 0;
+            cur_alb  <= 0;
+            tkstate  <= TK_ALB1;
+        end
+        TK_ALB1: tkstate <= TK_ALB2;        // astart_q catches up
+        TK_ALB2: begin
+            if (astart_val <= {6'd0, song_index})
+                cur_alb <= alb_scan;
+            if (alb_scan == idx_albums[8:0] - 1'b1) begin
+                tkstate <= TK_ALB3;
+            end else begin
+                alb_scan <= alb_scan + 1'b1;
+                tkstate  <= TK_ALB1;
+            end
+        end
+        TK_ALB3: begin
+            if (album_dir)
+                alb_scan <= (cur_alb + 1'b1 == idx_albums[8:0]) ? 9'd0 : cur_alb + 1'b1;
+            else
+                alb_scan <= (cur_alb == 0) ? idx_albums[8:0] - 1'b1 : cur_alb - 1'b1;
+            tkstate <= TK_ALB4;
+        end
+        TK_ALB4: tkstate <= TK_ALB5;        // astart_q catches up
+        TK_ALB5: begin
+            issue_index <= (astart_val < {6'd0, song_count}) ? astart_val[9:0] : 10'd0;
+            tkstate <= TK_ISSUE;
         end
 
         TK_ISSUE: begin
@@ -755,6 +888,8 @@ always @(posedge clk_74a) begin
                     short_read <= 1;
                     retry_timer <= 0;
                     tkstate <= TK_RETRY;
+                end else if (probing) begin
+                    tkstate <= TK_IDX_EVAL;
                 end else begin
                     load_ok <= 1;
                     tkstate <= TK_DONE;
@@ -778,6 +913,8 @@ always @(posedge clk_74a) begin
                     short_read <= 1;        // next attempt avoids the EOF edge
                     retry_timer <= 0;
                     tkstate <= TK_RETRY;
+                end else if (probing) begin
+                    tkstate <= TK_IDX_EVAL;
                 end else begin
                     load_ok <= 1;
                     tkstate <= TK_DONE;
@@ -800,6 +937,8 @@ always @(posedge clk_74a) begin
 
         TK_RETRY: begin
             // wait ~220ms, then re-run the whole flow (size + count + load)
+            probing <= 0;
+            index_loading <= 0;
             retry_timer <= retry_timer + 1'b1;
             if (&retry_timer) begin
                 if (retry_cnt == 6'd8) begin
@@ -830,6 +969,7 @@ always @(posedge clk_74a) begin
         (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0)) begin
         pending_load    <= 1;
         pending_recount <= 1;
+        pending_album   <= 0;
         // only a mid-session file change needs the fresh-handle reopen;
         // boot (including its deferload update notification, when have_pak
         // is still 0) uses the plain proven path
@@ -860,6 +1000,11 @@ always @(posedge clk_74a) begin
             pending_index <= song_index;
             retry_cnt     <= 0;
             load_error    <= 0;
+        end else if ((btn_alb_next || btn_alb_prev) && pak_indexed && idx_albums > 1) begin
+            pending_album <= 1;
+            album_dir     <= btn_alb_next;
+            retry_cnt     <= 0;
+            load_error    <= 0;
         end
     end
 end
@@ -876,6 +1021,9 @@ synch_3 s_dl(track_loading, spc_downloading_s, clk_sys_21_48);
 
     wire    load_ok_s;
 synch_3 s_lok(load_ok, load_ok_s, clk_sys_21_48);
+
+    wire    index_loading_s;
+synch_3 s_il(index_loading, index_loading_s, clk_sys_21_48);
 
     reg     spc_downloading_s1 = 0;
     reg     spc_load_done = 0;
@@ -940,10 +1088,10 @@ spc_apu apu (
     .CLK            ( clk_sys_21_48 ),
     .RESET_N        ( pll_locked_sys ),
 
-    // loader writes only pass while a read WE commanded is in flight -
-    // APF's own re-pick streaming must not touch the APU
+    // loader writes only pass while a SONG read we commanded is in flight -
+    // APF's own re-pick streaming and the index probe must not touch the APU
     .LOAD_ACTIVE    ( spc_downloading_s ),
-    .LOAD_WR        ( loader_wr & spc_downloading_s ),
+    .LOAD_WR        ( loader_wr & spc_downloading_s & ~index_loading_s ),
     .LOAD_ADDR      ( loader_addr ),
     .LOAD_DATA      ( loader_data ),
     .LOAD_DONE      ( spc_load_done ),
