@@ -545,6 +545,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
 
     reg             pending_load = 0;
     reg             pending_recount = 0;
+    reg             pending_reopen = 0;
     reg     [9:0]   pending_index = 0;
 
     reg     [4:0]   tkstate = 0;
@@ -617,8 +618,16 @@ always @(posedge clk_74a) begin
 
         TK_DEFER: begin
             defer_timer <= defer_timer + 1'b1;
-            if (&defer_timer)
-                tkstate <= TK_GETFILE;
+            if (&defer_timer) begin
+                // fresh-handle reopen only after a file change or a failed
+                // attempt - the plain boot path must stay untouched
+                if (pending_reopen) begin
+                    pending_reopen <= 0;
+                    tkstate <= TK_GETFILE;
+                end else begin
+                    tkstate <= TK_SIZE0;
+                end
+            end
         end
 
         // getfile -> openfile: ask APF for the slot's (possibly just
@@ -803,6 +812,7 @@ always @(posedge clk_74a) begin
                     retry_cnt <= retry_cnt + 1'b1;
                     pending_load    <= 1;
                     pending_recount <= 1;
+                    pending_reopen  <= 1;   // retries try a fresh handle
                     pending_index   <= issue_index;
                     tkstate <= TK_IDLE;
                 end
@@ -823,6 +833,12 @@ always @(posedge clk_74a) begin
         (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0)) begin
         pending_load    <= 1;
         pending_recount <= 1;
+        // only a mid-session file change needs the fresh-handle reopen;
+        // boot (including its deferload update notification, when have_pak
+        // is still 0) uses the plain proven path
+        pending_reopen  <= have_pak &&
+                           ((dataslot_update && dataslot_update_id == 16'h0) ||
+                            (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0));
         pending_random  <= 0;
         pending_index   <= 0;
         retry_cnt       <= 0;
@@ -1046,6 +1062,13 @@ assign video_hs = vidout_hs;
     reg         ever_played = 0;
     reg [5:0]   venv_vid [0:7];
     integer     vj;
+    reg [4:0]   dbg_state;
+    reg [2:0]   dbg_err;
+    reg [5:0]   dbg_retry;
+
+    function [7:0] hexch(input [3:0] d);
+        hexch = (d < 10) ? {4'h3, d} : (8'h37 + {4'd0, d});
+    endfunction
 
     reg [23:0]  border_rgb;
 always @(*) begin
@@ -1118,6 +1141,14 @@ always @(*) begin
         5'd6:    track_ch = (c_d2 == 0 && c_d1 == 0) ? 8'h20 : {4'h3, c_d1};
         5'd7:    track_ch = {4'h3, c_d0};
         5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S'
+        // debug readout while stopped: "D<state hex> E<err> R<retry>"
+        5'd12:   track_ch = playing_vid ? 8'h20 : 8'h44;            // 'D'
+        5'd13:   track_ch = playing_vid ? 8'h20 : hexch({3'd0, dbg_state[4]});
+        5'd14:   track_ch = playing_vid ? 8'h20 : hexch(dbg_state[3:0]);
+        5'd16:   track_ch = playing_vid ? 8'h20 : 8'h45;            // 'E'
+        5'd17:   track_ch = playing_vid ? 8'h20 : hexch({1'b0, dbg_err});
+        5'd18:   track_ch = playing_vid ? 8'h20 : 8'h52;            // 'R'
+        5'd19:   track_ch = playing_vid ? 8'h20 : hexch(dbg_retry[3:0]);
         // elapsed MM:SS / total MM:SS, right side
         5'd20:   track_ch = {4'h3, el_m_t};
         5'd21:   track_ch = {4'h3, el_m_o};
@@ -1216,6 +1247,9 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             shuffle_vid <= shuffle_en;
             for (vj = 0; vj < 8; vj = vj + 1)
                 venv_vid[vj] <= venv_peak[vj][10:5];
+            dbg_state <= tkstate;
+            dbg_err   <= target_dataslot_err;
+            dbg_retry <= retry_cnt;
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -1244,6 +1278,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
+                    else if (line_track && text_px)
+                        vidout_rgb <= 24'h909090;   // debug readout
                 end else begin
                     if (!playing_vid && visible_x >= 'd498 && visible_x < 'd506 &&
                         visible_y >= 'd4 && visible_y < 'd12)
