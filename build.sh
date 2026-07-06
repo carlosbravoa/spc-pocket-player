@@ -10,7 +10,7 @@ echo "=== Quartus compile ==="
 
 echo "=== Reversing RBF ==="
 python3 tools/reverse_bits.py src/fpga/output_files/ap_core.rbf \
-    pkg/Cores/cbravoa.SPCPlayer/bitstream.rbf_r
+    pkg/Cores/bravo.SPCPlayer/bitstream.rbf_r
 
 echo "=== Assembling SD tree in out/ ==="
 rm -rf out

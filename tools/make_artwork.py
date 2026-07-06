@@ -65,7 +65,7 @@ W, H = 36, 36
 icon = [[0] * W for _ in range(H)]
 draw_note(icon, W, H, 4, 4, 1, 255)
 draw_text(icon, W, H, "SPC", 4, 26, 1, 200)
-emit(icon, W, H, "pkg/Cores/cbravoa.SPCPlayer/icon.bin")
+emit(icon, W, H, "pkg/Cores/bravo.SPCPlayer/icon.bin")
 
 # ---- platform image 521x165 ----
 W, H = 521, 165
