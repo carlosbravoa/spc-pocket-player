@@ -316,7 +316,7 @@ always @(*) begin
     default: begin
         bridge_rd_data <= 0;
     end
-    32'hF0xxxxxx: begin
+    32'h40xxxxxx: begin
         bridge_rd_data <= fbuf_q;       // getfile/openfile struct buffer
     end
     32'hF8xxxxxx: begin
@@ -335,7 +335,7 @@ initial begin
 end
 always @(posedge clk_74a) begin
     fbuf_q <= fbuf[bridge_addr[9:2]];
-    if (bridge_wr && bridge_addr[31:24] == 8'hF0 && bridge_addr[9:2] < 8'd64)
+    if (bridge_wr && bridge_addr[31:24] == 8'h40 && bridge_addr[9:2] < 8'd64)
         fbuf[bridge_addr[9:2]] <= bridge_wr_data;
 end
 
@@ -410,8 +410,8 @@ end
     reg     [31:0]  target_dataslot_bridgeaddr;
     reg     [31:0]  target_dataslot_length;
 
-    wire    [31:0]  target_buffer_param_struct = 32'hF0000000; // openfile reads path from fbuf
-    wire    [31:0]  target_buffer_resp_struct  = 32'hF0000000; // getfile writes path into fbuf
+    wire    [31:0]  target_buffer_param_struct = 32'h40000000; // openfile reads path from fbuf
+    wire    [31:0]  target_buffer_resp_struct  = 32'h40000000; // getfile writes path into fbuf
 
 // bridge data slot access
 // synchronous to clk_74a

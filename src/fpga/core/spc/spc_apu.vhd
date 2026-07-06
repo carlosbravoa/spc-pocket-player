@@ -104,6 +104,10 @@ architecture rtl of spc_apu is
 	signal LEN_SEC      : unsigned(15 downto 0) := (others => '0');
 	signal LEN_VALID    : std_logic := '0';
 	signal SND_RDY_I    : std_logic;
+	signal AUDIO_L_I    : std_logic_vector(15 downto 0);
+	signal AUDIO_R_I    : std_logic_vector(15 downto 0);
+	-- end-of-song detection: 5s of continuous silence advances the track
+	signal QUIET_CNT    : integer range 0 to 159999 := 0;
 	signal SAMP_CNT     : integer range 0 to 31999 := 0;
 	signal ELAPSED      : unsigned(15 downto 0) := (others => '0');
 	signal FADE_LVL     : unsigned(7 downto 0) := (others => '1');
@@ -210,11 +214,14 @@ begin
 		SS_DI      => x"00",
 		SS_DO      => open,
 
-		AUDIO_L    => AUDIO_L,
-		AUDIO_R    => AUDIO_R,
+		AUDIO_L    => AUDIO_L_I,
+		AUDIO_R    => AUDIO_R_I,
 		SND_RDY    => SND_RDY_I,
 		VOICE_ENV  => VOICE_ENV
 	);
+
+	AUDIO_L <= AUDIO_L_I;
+	AUDIO_R <= AUDIO_R_I;
 
 	SND_RDY <= SND_RDY_I;
 
@@ -238,7 +245,21 @@ begin
 				ELAPSED  <= (others => '0');
 				FADE_LVL <= (others => '1');
 				FADE_CNT <= 0;
+				QUIET_CNT <= 0;
 			elsif SND_RDY_I = '1' then
+				-- end-of-song: both channels essentially silent for 5s
+				if signed(AUDIO_L_I) < 64 and signed(AUDIO_L_I) > -64 and
+				   signed(AUDIO_R_I) < 64 and signed(AUDIO_R_I) > -64 then
+					if QUIET_CNT = 159999 then
+						QUIET_CNT <= 0;
+						ADVANCE   <= '1';
+					else
+						QUIET_CNT <= QUIET_CNT + 1;
+					end if;
+				else
+					QUIET_CNT <= 0;
+				end if;
+
 				if SAMP_CNT = 31999 then
 					SAMP_CNT <= 0;
 					ELAPSED  <= ELAPSED + 1;
