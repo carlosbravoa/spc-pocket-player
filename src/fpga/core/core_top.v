@@ -643,17 +643,17 @@ always @(posedge clk_74a) begin
             retry_timer <= retry_timer + 1'b1;
             if (target_dataslot_done && retry_timer > 24'd16) begin
                 target_dataslot_getfile <= 0;
-                if (target_dataslot_err == 0) begin
+                // best-effort: a failed getfile must not block the load -
+                // skip the reopen and try the plain read
+                if (target_dataslot_err == 0)
                     tkstate <= TK_OPENFILE;
-                end else begin
-                    retry_timer <= 0;
-                    tkstate <= TK_RETRY;
-                end
+                else
+                    tkstate <= TK_SIZE0;
             end else if (target_dataslot_ack) begin
                 target_dataslot_getfile <= 0;
             end else if (&retry_timer) begin
                 target_dataslot_getfile <= 0;
-                tkstate <= TK_RETRY;
+                tkstate <= TK_SIZE0;
             end
         end
         TK_OPENFILE: begin
@@ -666,17 +666,14 @@ always @(posedge clk_74a) begin
             retry_timer <= retry_timer + 1'b1;
             if (target_dataslot_done && retry_timer > 24'd16) begin
                 target_dataslot_openfile <= 0;
-                if (target_dataslot_err <= 3'd1) begin   // 0=opened, 1=created
-                    tkstate <= TK_SIZE0;
-                end else begin
-                    retry_timer <= 0;
-                    tkstate <= TK_RETRY;
-                end
+                // best-effort: proceed to the read whether the reopen
+                // worked or not (err stays visible in the debug readout)
+                tkstate <= TK_SIZE0;
             end else if (target_dataslot_ack) begin
                 target_dataslot_openfile <= 0;
             end else if (&retry_timer) begin
                 target_dataslot_openfile <= 0;
-                tkstate <= TK_RETRY;
+                tkstate <= TK_SIZE0;
             end
         end
 
@@ -1065,6 +1062,8 @@ assign video_hs = vidout_hs;
     reg [4:0]   dbg_state;
     reg [2:0]   dbg_err;
     reg [5:0]   dbg_retry;
+    reg [255:0] path_vid;
+    integer     pk;
 
     function [7:0] hexch(input [3:0] d);
         hexch = (d < 10) ? {4'h3, d} : (8'h37 + {4'd0, d});
@@ -1165,8 +1164,14 @@ always @(*) begin
     endcase
 end
 
+    // when stopped, the game-title line shows the getfile path (debug):
+    // 32 chars, MSB-first within each 32-bit bridge word
+    wire [7:0]  path_raw = path_vid[{la_ci[4:2], ~la_ci[1:0], 3'b000} +: 8];
+    wire [7:0]  path_ch  = (path_raw < 8'h20 || path_raw > 8'h7E) ? 8'h2E : path_raw;
+
     wire [7:0]  font_ch = line_title ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
-                        : line_game  ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
+                        : line_game  ? (playing_vid ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
+                                                    : path_ch)
                         : line_hint  ? hint_ch
                         : track_ch;
 
@@ -1250,6 +1255,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             dbg_state <= tkstate;
             dbg_err   <= target_dataslot_err;
             dbg_retry <= retry_cnt;
+            for (pk = 0; pk < 8; pk = pk + 1)
+                path_vid[pk*32 +: 32] <= fbuf[pk];
         end
 
         // we want HS to occur a bit after VS, not on the same cycle
@@ -1278,8 +1285,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
-                    else if (line_track && text_px)
-                        vidout_rgb <= 24'h909090;   // debug readout
+                    else if ((line_track || line_game) && text_px)
+                        vidout_rgb <= 24'h909090;   // debug readout + path
                 end else begin
                     if (!playing_vid && visible_x >= 'd498 && visible_x < 'd506 &&
                         visible_y >= 'd4 && visible_y < 'd12)
