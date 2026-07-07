@@ -27,13 +27,23 @@
           },
           {
             "id": 4,
+            "name": "Scope: Pack/Album",
+            "key": "pad_btn_x"
+          },
+          {
+            "id": 5,
             "name": "Previous Album",
             "key": "pad_trig_l"
           },
           {
-            "id": 5,
+            "id": 6,
             "name": "Next Album",
             "key": "pad_trig_r"
+          },
+          {
+            "id": 7,
+            "name": "Album List",
+            "key": "pad_btn_select"
           }
         ]
       }

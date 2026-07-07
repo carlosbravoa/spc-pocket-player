@@ -526,13 +526,32 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     wire            btn_prev    = cont1_key_s74[2] & ~cont1_key_prev[2];
     wire            btn_restart = cont1_key_s74[4] & ~cont1_key_prev[4];
     wire            btn_shuffle = cont1_key_s74[7] & ~cont1_key_prev[7];   // Y
+    wire            btn_scope   = cont1_key_s74[6] & ~cont1_key_prev[6];   // X
     wire            btn_alb_prev = cont1_key_s74[8] & ~cont1_key_prev[8];  // L1
     wire            btn_alb_next = cont1_key_s74[9] & ~cont1_key_prev[9];  // R1
+    wire            btn_browse  = cont1_key_s74[14] & ~cont1_key_prev[14]; // Select
+    wire            btn_up      = cont1_key_s74[0] & ~cont1_key_prev[0];   // dpad up
+    wire            btn_down    = cont1_key_s74[1] & ~cont1_key_prev[1];   // dpad down
 
     reg             shuffle_en = 0;
+    reg             scope_album = 0;    // 0 = whole pack, 1 = current album
     reg     [15:0]  lfsr = 16'hACE1;
     reg             pending_random = 0;
     reg     [15:0]  rand_rem;
+
+    // current album bounds (valid for indexed packs), updated after each load
+    reg     [11:0]  alb_lo = 0;
+    reg     [11:0]  alb_hi = 0;         // exclusive
+    // effective playback scope for next/prev/shuffle
+    wire    [11:0]  scope_lo = (scope_album && pak_indexed) ? alb_lo : 12'd0;
+    wire    [11:0]  scope_hi = (scope_album && pak_indexed) ? alb_hi : song_count;
+
+    // album browser overlay
+    localparam      BROWSE_ROWS = 11;
+    reg             browse_mode = 0;
+    reg     [7:0]   browse_cursor = 0;
+    reg     [7:0]   browse_top = 0;     // first visible album row
+    reg             album_goto = 0;     // 1 = jump to browse_cursor, 0 = step
 
     reg             allcomplete_1 = 0;
     reg             reset_n_1 = 0;
@@ -550,7 +569,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     reg             pending_reopen = 0;
     reg     [11:0]  pending_index = 0;
 
-    reg     [4:0]   tkstate = 0;
+    reg     [5:0]   tkstate = 0;
     localparam TK_IDLE     = 0;
     localparam TK_SIZE0    = 1;
     localparam TK_SIZE1    = 2;
@@ -576,11 +595,20 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     localparam TK_ALB3     = 23;
     localparam TK_ALB4     = 24;
     localparam TK_ALB5     = 25;
+    localparam TK_ALB6     = 26;
+    localparam TK_ALB7     = 27;
+    localparam TK_BND0     = 28;
+    localparam TK_BND1     = 29;
+    localparam TK_BND2     = 30;
+    localparam TK_BND3     = 31;
+    localparam TK_BND4     = 32;
+    localparam TK_BND5     = 33;
 
     reg             probing = 0;
     reg             pending_album = 0;
     reg             album_dir = 0;
     reg     [8:0]   cur_alb;
+    reg     [8:0]   target_alb;
 
     // wait ~450ms after a file change before touching the slot - reads
     // issued while APF is still swapping files never complete
@@ -622,7 +650,14 @@ always @(posedge clk_74a) begin
     if (idx_bwr && bridge_addr[16:0] >= 17'h10 && bridge_addr[16:0] < 17'h210)
         astart_ram[bridge_addr[9:2] - 8'd4] <= bridge_wr_data;
     astart_q <= astart_ram[alb_scan[8:1]];
+    // album names: 256 x 32 bytes at index offset 0x210-0x2210 (2048 words)
+    if (idx_bwr && bridge_addr[16:0] >= 17'h210 && bridge_addr[16:0] < 17'h2210)
+        name_ram[bridge_addr[16:2] - 15'h84] <= bridge_wr_data;
 end
+
+    // album name table, written above (clk_74a), read by the video domain
+    reg     [31:0]  name_ram [0:2047];
+    reg     [31:0]  name_q;
 
     // album_start[a]: even entries in the word's high half, odd in the low,
     // each little-endian
@@ -653,8 +688,28 @@ always @(posedge clk_74a) begin
     reset_n_1      <= reset_n;
 
     lfsr <= lfsr[0] ? (lfsr >> 1) ^ 16'hB400 : lfsr >> 1;
-    if (btn_shuffle)
-        shuffle_en <= ~shuffle_en;
+
+    // browse mode: Select opens/closes the album list; up/down move the
+    // cursor; A jumps to the highlighted album (handled in the trigger block)
+    if (btn_browse && pak_indexed && idx_albums > 1)
+        browse_mode <= ~browse_mode;
+
+    if (browse_mode) begin
+        if (btn_up && browse_cursor != 0)
+            browse_cursor <= browse_cursor - 1'b1;
+        else if (btn_down && browse_cursor + 1'b1 < idx_albums[7:0])
+            browse_cursor <= browse_cursor + 1'b1;
+        // keep the cursor inside the visible window (BROWSE_ROWS rows)
+        if (browse_cursor < browse_top)
+            browse_top <= browse_cursor;
+        else if (browse_cursor >= browse_top + BROWSE_ROWS)
+            browse_top <= browse_cursor - (BROWSE_ROWS - 1);
+    end else begin
+        if (btn_shuffle)
+            shuffle_en <= ~shuffle_en;
+        if (btn_scope && pak_indexed && idx_albums > 1)
+            scope_album <= ~scope_album;
+    end
 
     case (tkstate)
         TK_IDLE: begin
@@ -743,14 +798,15 @@ always @(posedge clk_74a) begin
         TK_RAND: begin
             // rand_rem mod song_count by repeated subtraction, then avoid
             // repeating the current song
-            if (rand_rem >= {4'd0, song_count}) begin
-                rand_rem <= rand_rem - {4'd0, song_count};
+            // random index within [scope_lo, scope_hi): rand mod range + lo
+            if (rand_rem >= {4'd0, (scope_hi - scope_lo)}) begin
+                rand_rem <= rand_rem - {4'd0, (scope_hi - scope_lo)};
             end else begin
-                if (rand_rem[11:0] == song_index)
-                    issue_index <= (rand_rem[11:0] + 1'b1 == song_count) ? 12'd0
-                                                                         : rand_rem[11:0] + 1'b1;
+                if (scope_lo + rand_rem[11:0] == song_index)
+                    issue_index <= (scope_lo + rand_rem[11:0] + 1'b1 >= scope_hi)
+                                   ? scope_lo : scope_lo + rand_rem[11:0] + 1'b1;
                 else
-                    issue_index <= rand_rem[11:0];
+                    issue_index <= scope_lo + rand_rem[11:0];
                 tkstate <= TK_ISSUE;
             end
         end
@@ -822,8 +878,8 @@ always @(posedge clk_74a) begin
             tkstate <= TK_ISSUE;
         end
 
-        // album jump (L1/R1): scan album_start for the current album, then
-        // load the first track of the neighbor
+        // album jump: find the target album (browse cursor, or step from the
+        // current one), then load its first track and set the album bounds
         TK_ALB0: begin
             alb_scan <= 0;
             cur_alb  <= 0;
@@ -841,16 +897,64 @@ always @(posedge clk_74a) begin
             end
         end
         TK_ALB3: begin
-            if (album_dir)
-                alb_scan <= (cur_alb + 1'b1 == idx_albums[8:0]) ? 9'd0 : cur_alb + 1'b1;
+            // pick the target album, then read album_start[target]
+            if (album_goto)
+                target_alb <= {1'b0, browse_cursor};
+            else if (album_dir)
+                target_alb <= (cur_alb + 1'b1 == idx_albums[8:0]) ? 9'd0 : cur_alb + 1'b1;
             else
-                alb_scan <= (cur_alb == 0) ? idx_albums[8:0] - 1'b1 : cur_alb - 1'b1;
+                target_alb <= (cur_alb == 0) ? idx_albums[8:0] - 1'b1 : cur_alb - 1'b1;
+            alb_scan <= album_goto ? {1'b0, browse_cursor}
+                      : album_dir  ? ((cur_alb + 1'b1 == idx_albums[8:0]) ? 9'd0 : cur_alb + 1'b1)
+                                   : ((cur_alb == 0) ? idx_albums[8:0] - 1'b1 : cur_alb - 1'b1);
             tkstate <= TK_ALB4;
         end
         TK_ALB4: tkstate <= TK_ALB5;        // astart_q catches up
         TK_ALB5: begin
+            // alb_lo = album_start[target]; now read album_start[target+1]
+            alb_lo <= (astart_val < {4'd0, song_count}) ? astart_val[11:0] : 12'd0;
             issue_index <= (astart_val < {4'd0, song_count}) ? astart_val[11:0] : 12'd0;
+            alb_scan <= target_alb + 1'b1;
+            tkstate <= TK_ALB6;
+        end
+        TK_ALB6: tkstate <= TK_ALB7;        // astart_q catches up
+        TK_ALB7: begin
+            // alb_hi = album_start[target+1], or song_count for the last album
+            alb_hi <= (target_alb + 1'b1 >= idx_albums[8:0]) ? song_count
+                    : (astart_val < {4'd0, song_count}) ? astart_val[11:0] : song_count;
             tkstate <= TK_ISSUE;
+        end
+
+        // recompute the current album bounds for song_index after a load
+        // (so scope=album works no matter how we got here)
+        TK_BND0: begin
+            alb_scan <= 0;
+            cur_alb  <= 0;
+            alb_lo   <= 0;
+            tkstate  <= TK_BND1;
+        end
+        TK_BND1: tkstate <= TK_BND2;
+        TK_BND2: begin
+            if (astart_val <= {4'd0, song_index}) begin
+                cur_alb <= alb_scan;
+                alb_lo  <= astart_val[11:0];
+            end
+            if (alb_scan == idx_albums[8:0] - 1'b1)
+                tkstate <= TK_BND3;         // let cur_alb settle
+            else begin
+                alb_scan <= alb_scan + 1'b1;
+                tkstate  <= TK_BND1;
+            end
+        end
+        TK_BND3: begin
+            alb_scan <= cur_alb + 1'b1;     // read album_start[cur_alb+1]
+            tkstate  <= TK_BND4;
+        end
+        TK_BND4: tkstate <= TK_BND5;        // astart_q catches up
+        TK_BND5: begin
+            alb_hi <= (cur_alb + 1'b1 >= idx_albums[8:0]) ? song_count
+                    : (astart_val < {4'd0, song_count}) ? astart_val[11:0] : song_count;
+            tkstate <= TK_IDLE;
         end
 
         TK_ISSUE: begin
@@ -934,7 +1038,8 @@ always @(posedge clk_74a) begin
             track_loading <= 0;
             retry_cnt  <= 0;
             load_error <= 0;
-            tkstate <= TK_IDLE;
+            // refresh album bounds for the loaded song (indexed packs only)
+            tkstate <= pak_indexed ? TK_BND0 : TK_IDLE;
         end
 
         TK_RETRY: begin
@@ -983,17 +1088,28 @@ always @(posedge clk_74a) begin
         retry_cnt       <= 0;
         load_error      <= 0;
         short_read      <= 0;
+    end else if (browse_mode) begin
+        // A jumps to the highlighted album (scope follows into album mode)
+        if (btn_restart && pak_indexed) begin
+            pending_album <= 1;
+            album_dir     <= 1'b0;
+            album_goto    <= 1'b1;
+            retry_cnt     <= 0;
+            load_error    <= 0;
+            browse_mode   <= 0;
+        end
     end else if (have_pak && song_count != 0) begin
+        // next/auto-advance: within the active scope (whole pack or album)
         if (btn_next || (adv_toggle_s ^ adv_toggle_1)) begin
             pending_load  <= 1;
-            pending_random <= shuffle_en && song_count > 1;
-            pending_index <= (song_index + 1'b1 == song_count) ? 10'd0 : song_index + 1'b1;
+            pending_random <= shuffle_en && (scope_hi - scope_lo > 12'd1);
+            pending_index <= (song_index + 1'b1 >= scope_hi) ? scope_lo : song_index + 1'b1;
             retry_cnt     <= 0;
             load_error    <= 0;
         end else if (btn_prev) begin
             pending_load  <= 1;
             pending_random <= 0;
-            pending_index <= (song_index == 0) ? song_count - 1'b1 : song_index - 1'b1;
+            pending_index <= (song_index <= scope_lo) ? scope_hi - 1'b1 : song_index - 1'b1;
             retry_cnt     <= 0;
             load_error    <= 0;
         end else if (btn_restart) begin
@@ -1005,6 +1121,7 @@ always @(posedge clk_74a) begin
         end else if ((btn_alb_next || btn_alb_prev) && pak_indexed && idx_albums > 1) begin
             pending_album <= 1;
             album_dir     <= btn_alb_next;
+            album_goto    <= 1'b0;
             retry_cnt     <= 0;
             load_error    <= 0;
         end
@@ -1209,7 +1326,7 @@ assign video_hs = vidout_hs;
     reg         ever_played = 0;
     reg [5:0]   venv_vid [0:7];
     integer     vj;
-    reg [4:0]   dbg_state;
+    reg [5:0]   dbg_state;
     reg [2:0]   dbg_err;
     reg [5:0]   dbg_retry;
     reg [31:0]  dbg_size;
@@ -1217,10 +1334,32 @@ assign video_hs = vidout_hs;
     reg         dbg_idx;
     reg [255:0] path_vid;
     integer     pk;
+    reg         scope_vid;
+    reg         browse_vid;
+    reg [7:0]   cursor_vid;
+    reg [7:0]   top_vid;
+    reg [8:0]   nalb_vid;
 
     function [7:0] hexch(input [3:0] d);
         hexch = (d < 10) ? {4'h3, d} : (8'h37 + {4'd0, d});
     endfunction
+
+    // album browser: geometry and name-RAM read (video clock)
+    localparam  BROWSE_Y0 = 'd24;       // first row top
+    wire [8:0]  browse_row  = (visible_y - BROWSE_Y0) >> 4;         // 16px/row
+    wire [7:0]  browse_alb  = top_vid + browse_row[7:0];
+    wire        browse_area = browse_vid && visible_y >= BROWSE_Y0 &&
+                              browse_row < BROWSE_ROWS && browse_alb < nalb_vid;
+    // read name byte for the char one ahead (registered BRAM), MSB-first
+    wire [7:0]  name_alb  = top_vid + browse_row[7:0];
+    wire [10:0] name_radr = {name_alb[7:0], la_ci[4:2]};
+    reg  [2:0]  name_bsel;
+always @(posedge clk_video_10_74) begin
+    name_q    <= name_ram[name_radr];
+    name_bsel <= {la_ci[1:0], 1'b0};
+end
+    wire [7:0]  name_raw = name_q[(3 - name_bsel[2:1])*8 +: 8];
+    wire [7:0]  name_ch  = (name_raw < 8'h20 || name_raw > 8'h7E) ? 8'h20 : name_raw;
 
     reg [23:0]  border_rgb;
 always @(*) begin
@@ -1245,11 +1384,15 @@ end
     wire        line_title = (visible_y[8:4] == 'd4);
     wire        line_game  = (visible_y[8:4] == 'd6);
     wire        line_hint  = (visible_y[8:4] == 'd13);
-    wire        any_text_line = line_track | line_title | line_game | line_hint;
+    wire        line_hint2 = (visible_y[8:4] == 'd14);
+    wire        any_text_line = line_track | line_title | line_game |
+                                line_hint | line_hint2 | browse_area;
 
-    // subtle control hints, bottom of screen
-    localparam [8*32-1:0] HINTS = " <PREV  NEXT>  A:RESTART  Y:SHUF";
-    wire [7:0]  hint_ch = HINTS[(31 - la_ci)*8 +: 8];
+    // subtle control hints, two lines at the bottom of the screen
+    localparam [8*32-1:0] HINTS  = "L/R:PREV NEXT  A:RST  Y:SHUFFL";
+    localparam [8*32-1:0] HINTS2 = "X:SCOPE  L1/R1:ALBUM  SEL:LIST ";
+    wire [7:0]  hint_ch  = HINTS [(31 - la_ci)*8 +: 8];
+    wire [7:0]  hint2_ch = HINTS2[(31 - la_ci)*8 +: 8];
 
     // track counter digits (from once-per-frame latched values)
     // 3-digit counter (saturates at 999 for display; core supports 4095)
@@ -1295,10 +1438,11 @@ always @(*) begin
         5'd5:    track_ch = (c_d2 == 0) ? 8'h20 : {4'h3, c_d2};
         5'd6:    track_ch = (c_d2 == 0 && c_d1 == 0) ? 8'h20 : {4'h3, c_d1};
         5'd7:    track_ch = {4'h3, c_d0};
-        5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S'
+        5'd9:    track_ch = scope_vid   ? 8'h41 : 8'h20;    // 'A' = album scope
+        5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S' = shuffle
         // debug readout while stopped: "D<state hex> E<err> R<retry>"
         5'd12:   track_ch = playing_vid ? 8'h20 : 8'h44;            // 'D'
-        5'd13:   track_ch = playing_vid ? 8'h20 : hexch({3'd0, dbg_state[4]});
+        5'd13:   track_ch = playing_vid ? 8'h20 : hexch({2'd0, dbg_state[5:4]});
         5'd14:   track_ch = playing_vid ? 8'h20 : hexch(dbg_state[3:0]);
         5'd16:   track_ch = playing_vid ? 8'h20 : 8'h45;            // 'E'
         5'd17:   track_ch = playing_vid ? 8'h20 : hexch({1'b0, dbg_err});
@@ -1349,11 +1493,13 @@ always @(*) begin
     endcase
 end
 
-    wire [7:0]  font_ch = line_title ? (playing_vid ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
+    wire [7:0]  font_ch = browse_vid ? (browse_area ? name_ch : 8'h20)
+                        : line_title ? (playing_vid ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
                                                     : title_dbg_ch)
                         : line_game  ? (playing_vid ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
                                                     : path_ch)
                         : line_hint  ? hint_ch
+                        : line_hint2 ? hint2_ch
                         : track_ch;
 
     wire [7:0]  font_bits;
@@ -1366,7 +1512,10 @@ font_rom fnt (
     .bits   ( font_bits )
 );
 
-    wire        text_px = font_bits[font_col_r];
+    // browser adds one pipeline stage (registered name-RAM read), so its
+    // glyph column select is delayed one extra cycle to stay aligned
+    reg  [2:0]  font_col_r2;
+    wire        text_px = font_bits[browse_vid ? font_col_r2 : font_col_r];
 
     // per-voice envelope bars: 8 columns of 64px, y 120-183, growing upward
     wire [2:0]  vbar_v = visible_x[8:6];
@@ -1403,6 +1552,7 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
         vidout_hs <= 0;
 
         font_col_r <= la_vx[3:1];
+        font_col_r2 <= font_col_r;
 
         // x and y counters
         x_count <= x_count + 1'b1;
@@ -1431,6 +1581,11 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             elapsed_vid <= apu_elapsed;
             length_vid <= apu_length;
             shuffle_vid <= shuffle_en;
+            scope_vid  <= scope_album;
+            browse_vid <= browse_mode;
+            cursor_vid <= browse_cursor;
+            top_vid    <= browse_top;
+            nalb_vid   <= idx_albums[8:0];
             for (vj = 0; vj < 8; vj = vj + 1)
                 venv_vid[vj] <= venv_peak[vj][10:5];
             dbg_state <= tkstate;
@@ -1460,7 +1615,14 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                 // dark background
                 vidout_rgb <= 24'h101018;
 
-                if (!playing_vid && (!ever_played || status_vid == 2'd2)) begin
+                if (browse_vid) begin
+                    // album browser overlay (full screen)
+                    if (browse_alb == cursor_vid && browse_area)
+                        vidout_rgb <= 24'h283048;   // highlighted row background
+                    if (browse_area && text_px)
+                        vidout_rgb <= (browse_alb == cursor_vid) ? 24'hF0F0A0
+                                                                 : 24'hC0C0C0;
+                end else if (!playing_vid && (!ever_played || status_vid == 2'd2)) begin
                     // status frame border, shown only before the first song
                     // has ever played or on a persistent error - brief track
                     // loads keep the normal UI (no flashing):
@@ -1484,6 +1646,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     else if (line_game && text_px)
                         vidout_rgb <= 24'h9098A8;
                     else if (line_hint && text_px)
+                        vidout_rgb <= 24'h50505C;
+                    else if (line_hint2 && text_px)
                         vidout_rgb <= 24'h50505C;
                     // per-voice envelope bars, y 120-183
                     else if (vbar_on)
