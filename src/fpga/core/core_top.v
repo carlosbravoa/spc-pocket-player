@@ -547,7 +547,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     wire    [11:0]  scope_hi = (scope_album && pak_indexed) ? alb_hi : song_count;
 
     // album browser overlay
-    localparam      BROWSE_ROWS = 11;
+    localparam      BROWSE_ROWS = 26;   // y32..448 at 16px/row
     reg             browse_mode = 0;
     reg     [7:0]   browse_cursor = 0;
     reg     [7:0]   browse_top = 0;     // first visible album row
@@ -1293,8 +1293,9 @@ always @(posedge clk_sys_21_48) begin
 end
 
 ////////////////////////////////////////////////////////////////////////////////////////
-// video generation: 512x240 active raster at 10.738635 MHz dot clock
-// 682 x 262 total -> 60.09 Hz (SNES-like timing)
+// video generation: 512x480 active raster at 21.477270 MHz dot clock
+// 682 x 524 total -> 60.09 Hz. Fills the Pocket's ~10:9 screen (see video.json).
+// NOTE: the clk_video_10_74 nets are now 21.477 MHz (doubled); name kept.
 
 assign video_rgb_clock = clk_video_10_74;
 assign video_rgb_clock_90 = clk_video_10_74_90deg;
@@ -1304,18 +1305,18 @@ assign video_skip = 1'b0;
 assign video_vs = vidout_vs;
 assign video_hs = vidout_hs;
 
-    localparam  VID_V_BPORCH = 'd10;
-    localparam  VID_V_ACTIVE = 'd240;
-    localparam  VID_V_TOTAL  = 'd262;
+    localparam  VID_V_BPORCH = 'd20;
+    localparam  VID_V_ACTIVE = 'd480;
+    localparam  VID_V_TOTAL  = 'd524;
     localparam  VID_H_BPORCH = 'd120;
     localparam  VID_H_ACTIVE = 'd512;
     localparam  VID_H_TOTAL  = 'd682;
 
     reg [9:0]   x_count;
-    reg [8:0]   y_count;
+    reg [9:0]   y_count;
 
     wire [9:0]  visible_x = x_count - VID_H_BPORCH;
-    wire [8:0]  visible_y = y_count - VID_V_BPORCH;
+    wire [9:0]  visible_y = y_count - VID_V_BPORCH;
 
     reg [23:0]  vidout_rgb;
     reg         vidout_de;
@@ -1391,11 +1392,11 @@ end
     //   y 64-79:  song title
     //   y 96-111: game title
     //
-    wire        line_track = (visible_y[8:4] == 'd2);
-    wire        line_title = (visible_y[8:4] == 'd4);
-    wire        line_game  = (visible_y[8:4] == 'd6);
-    wire        line_hint  = (visible_y[8:4] == 'd13);
-    wire        line_hint2 = (visible_y[8:4] == 'd14);
+    wire        line_track = (visible_y[9:4] == 'd2);   // y32-47
+    wire        line_title = (visible_y[9:4] == 'd4);   // y64-79
+    wire        line_game  = (visible_y[9:4] == 'd6);   // y96-111
+    wire        line_hint  = (visible_y[9:4] == 'd28);  // y448-463
+    wire        line_hint2 = (visible_y[9:4] == 'd29);  // y464-479
     wire        any_text_line = line_track | line_title | line_game |
                                 line_hint | line_hint2 | browse_area;
 
@@ -1528,14 +1529,15 @@ font_rom fnt (
     reg  [2:0]  font_col_r2;
     wire        text_px = font_bits[browse_vid ? font_col_r2 : font_col_r];
 
-    // per-voice envelope bars: 8 columns of 64px, y 120-183, growing upward
+    // per-voice envelope bars: 8 columns of 64px, y 128-407, grow up from 408
     wire [2:0]  vbar_v = visible_x[8:6];
     wire [5:0]  vbar_x = visible_x[5:0];
     wire [5:0]  vbar_h = venv_vid[vbar_v];
-    wire        vbar_on = (visible_y >= 'd120 && visible_y < 'd184) &&
+    wire [8:0]  vbar_px = {vbar_h, 2'b00};   // envelope x4 -> up to 252px tall
+    wire        vbar_on = (visible_y >= 'd128 && visible_y < 'd408) &&
                           (vbar_x >= 'd8 && vbar_x < 'd56) &&
                           (vbar_h != 0) &&
-                          (visible_y >= (9'd184 - {3'd0, vbar_h}));
+                          (visible_y >= (10'd408 - {1'b0, vbar_px}));
     reg [23:0]  vbar_rgb;
 always @(*) begin
     case (vbar_v)
@@ -1661,17 +1663,17 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                         vidout_rgb <= 24'h50505C;
                     else if (line_hint2 && text_px)
                         vidout_rgb <= 24'h50505C;
-                    // per-voice envelope bars, y 120-183
+                    // per-voice envelope bars, y 128-407
                     else if (vbar_on)
                         vidout_rgb <= vbar_rgb;
-                    else if (visible_y == 'd186)
+                    else if (visible_y == 'd410)
                         // baseline under the voice bars
                         vidout_rgb <= 24'h202028;
-                    // thin L/R VU strips, y 192-199 / 200-207
-                    else if (visible_y >= 'd192 && visible_y < 'd200) begin
+                    // L/R VU strips, y 416-431 / 432-447
+                    else if (visible_y >= 'd416 && visible_y < 'd432) begin
                         if (visible_x < bar_l)
                             vidout_rgb <= 24'h30C060;   // green
-                    end else if (visible_y >= 'd200 && visible_y < 'd208) begin
+                    end else if (visible_y >= 'd432 && visible_y < 'd448) begin
                         if (visible_x < bar_r)
                             vidout_rgb <= 24'h3060C0;   // blue
                     end
