@@ -539,16 +539,16 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
 
     reg     [31:0]  pak_size = 0;
     reg     [31:0]  count_rem;
-    reg     [9:0]   song_count = 0;
-    reg     [9:0]   song_index = 0;
-    reg     [9:0]   issue_index;
+    reg     [11:0]  song_count = 0;    // up to 4095 songs
+    reg     [11:0]  song_index = 0;
+    reg     [11:0]  issue_index;
     reg             have_pak = 0;       // slot size known
     reg             track_loading = 0;
 
     reg             pending_load = 0;
     reg             pending_recount = 0;
     reg             pending_reopen = 0;
-    reg     [9:0]   pending_index = 0;
+    reg     [11:0]  pending_index = 0;
 
     reg     [4:0]   tkstate = 0;
     localparam TK_IDLE     = 0;
@@ -644,8 +644,8 @@ assign datatable_wren = 0;
 assign datatable_data = 0;
 
     // indexed packs: entry 0 is the index, songs shift up by one
-    wire    [10:0]  eff_index   = {1'b0, issue_index} + {10'd0, pak_indexed};
-    wire    [31:0]  song_offset = ({21'd0, eff_index} << 16) + ({21'd0, eff_index} << 9);
+    wire    [12:0]  eff_index   = {1'b0, issue_index} + {12'd0, pak_indexed};
+    wire    [31:0]  song_offset = ({19'd0, eff_index} << 16) + ({19'd0, eff_index} << 9);
 
 always @(posedge clk_74a) begin
     cont1_key_prev <= cont1_key_s74;
@@ -743,14 +743,14 @@ always @(posedge clk_74a) begin
         TK_RAND: begin
             // rand_rem mod song_count by repeated subtraction, then avoid
             // repeating the current song
-            if (rand_rem >= {6'd0, song_count}) begin
-                rand_rem <= rand_rem - {6'd0, song_count};
+            if (rand_rem >= {4'd0, song_count}) begin
+                rand_rem <= rand_rem - {4'd0, song_count};
             end else begin
-                if (rand_rem[9:0] == song_index)
-                    issue_index <= (rand_rem[9:0] + 1'b1 == song_count) ? 10'd0
-                                                                        : rand_rem[9:0] + 1'b1;
+                if (rand_rem[11:0] == song_index)
+                    issue_index <= (rand_rem[11:0] + 1'b1 == song_count) ? 12'd0
+                                                                         : rand_rem[11:0] + 1'b1;
                 else
-                    issue_index <= rand_rem[9:0];
+                    issue_index <= rand_rem[11:0];
                 tkstate <= TK_ISSUE;
             end
         end
@@ -769,12 +769,14 @@ always @(posedge clk_74a) begin
             tkstate <= TK_COUNT;
         end
         TK_COUNT: begin
-            if (count_rem >= SONG_BYTES && song_count != 10'h3FF) begin
+            if (count_rem >= SONG_BYTES && song_count != 12'hFFF) begin
                 count_rem  <= count_rem - SONG_BYTES;
                 song_count <= song_count + 1'b1;
             end else begin
-                // a trailing 0x10180-byte SPC (no extra-RAM section) counts
-                if (count_rem >= 32'h10180)
+                // a trailing 0x10180-byte SPC (no extra-RAM section) counts,
+                // but only if we stopped because the data ran out - not
+                // because we hit the count cap (which would overflow)
+                if (song_count != 12'hFFF && count_rem >= 32'h10180)
                     song_count <= song_count + 1'b1;
                 have_pak <= 1;
                 tkstate  <= TK_IDX_ISSUE;
@@ -811,9 +813,9 @@ always @(posedge clk_74a) begin
                 pak_indexed <= 1;
                 // songs = entries minus the index, clamped to the count
                 // the index itself declares
-                if ({6'd0, idx_tracks[9:0]} == idx_tracks &&
-                    idx_tracks[9:0] < song_count - 1'b1)
-                    song_count <= idx_tracks[9:0];
+                if ({4'd0, idx_tracks[11:0]} == idx_tracks &&
+                    idx_tracks[11:0] < song_count - 1'b1)
+                    song_count <= idx_tracks[11:0];
                 else
                     song_count <= song_count - 1'b1;
             end
@@ -829,7 +831,7 @@ always @(posedge clk_74a) begin
         end
         TK_ALB1: tkstate <= TK_ALB2;        // astart_q catches up
         TK_ALB2: begin
-            if (astart_val <= {6'd0, song_index})
+            if (astart_val <= {4'd0, song_index})
                 cur_alb <= alb_scan;
             if (alb_scan == idx_albums[8:0] - 1'b1) begin
                 tkstate <= TK_ALB3;
@@ -847,7 +849,7 @@ always @(posedge clk_74a) begin
         end
         TK_ALB4: tkstate <= TK_ALB5;        // astart_q catches up
         TK_ALB5: begin
-            issue_index <= (astart_val < {6'd0, song_count}) ? astart_val[9:0] : 10'd0;
+            issue_index <= (astart_val < {4'd0, song_count}) ? astart_val[11:0] : 12'd0;
             tkstate <= TK_ISSUE;
         end
 
@@ -1200,7 +1202,7 @@ assign video_hs = vidout_hs;
     reg [14:0]  vu_l_vid, vu_r_vid;
     reg         playing_vid;
     reg [511:0] title_vid;
-    reg [9:0]   idx_vid, cnt_vid;
+    reg [11:0]  idx_vid, cnt_vid;
     reg [1:0]   status_vid;
     reg [15:0]  elapsed_vid, length_vid;
     reg         shuffle_vid;
@@ -1211,7 +1213,7 @@ assign video_hs = vidout_hs;
     reg [2:0]   dbg_err;
     reg [5:0]   dbg_retry;
     reg [31:0]  dbg_size;
-    reg [9:0]   dbg_count;
+    reg [11:0]  dbg_count;
     reg         dbg_idx;
     reg [255:0] path_vid;
     integer     pk;
@@ -1250,13 +1252,16 @@ end
     wire [7:0]  hint_ch = HINTS[(31 - la_ci)*8 +: 8];
 
     // track counter digits (from once-per-frame latched values)
-    wire [9:0]  disp_n = idx_vid + 1'b1;
-    wire [3:0]  n_d2 = disp_n / 'd100;
-    wire [3:0]  n_d1 = (disp_n / 'd10) % 'd10;
-    wire [3:0]  n_d0 = disp_n % 'd10;
-    wire [3:0]  c_d2 = cnt_vid / 'd100;
-    wire [3:0]  c_d1 = (cnt_vid / 'd10) % 'd10;
-    wire [3:0]  c_d0 = cnt_vid % 'd10;
+    // 3-digit counter (saturates at 999 for display; core supports 4095)
+    wire [12:0] disp_n = idx_vid + 1'b1;
+    wire [12:0] disp_n_c = (disp_n > 13'd999) ? 13'd999 : disp_n;
+    wire [12:0] disp_c_c = (cnt_vid > 12'd999) ? 13'd999 : {1'b0, cnt_vid};
+    wire [3:0]  n_d2 = disp_n_c / 'd100;
+    wire [3:0]  n_d1 = (disp_n_c / 'd10) % 'd10;
+    wire [3:0]  n_d0 = disp_n_c % 'd10;
+    wire [3:0]  c_d2 = disp_c_c / 'd100;
+    wire [3:0]  c_d1 = (disp_c_c / 'd10) % 'd10;
+    wire [3:0]  c_d0 = disp_c_c % 'd10;
 
     // elapsed / total time, capped at 99:59
     wire [15:0] el_cap = (elapsed_vid > 16'd5999) ? 16'd5999 : elapsed_vid;
@@ -1335,7 +1340,7 @@ always @(*) begin
         5'd8:    title_dbg_ch = hexch(dbg_size[7:4]);
         5'd9:    title_dbg_ch = hexch(dbg_size[3:0]);
         5'd11:   title_dbg_ch = 8'h4E;   // N
-        5'd12:   title_dbg_ch = hexch({2'd0, dbg_count[9:8]});
+        5'd12:   title_dbg_ch = hexch(dbg_count[11:8]);
         5'd13:   title_dbg_ch = hexch(dbg_count[7:4]);
         5'd14:   title_dbg_ch = hexch(dbg_count[3:0]);
         5'd16:   title_dbg_ch = 8'h49;   // I

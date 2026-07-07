@@ -7,7 +7,7 @@
       "description": "SNES/Super Famicom SPC music player. Plays .spc sound files on the real S-SMP + S-DSP hardware implementation from the SNES core.",
       "author": "bravo",
       "url": "https://github.com/carlosbravoa/spc-pocket-player",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "date_release": "2026-07-05"
     },
     "framework": {
