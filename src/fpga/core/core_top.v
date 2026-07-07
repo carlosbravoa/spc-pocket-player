@@ -1452,14 +1452,6 @@ always @(*) begin
         5'd7:    track_ch = {4'h3, c_d0};
         5'd9:    track_ch = scope_vid   ? 8'h41 : 8'h20;    // 'A' = album scope
         5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S' = shuffle
-        // debug readout while stopped: "D<state hex> E<err> R<retry>"
-        5'd12:   track_ch = playing_vid ? 8'h20 : 8'h44;            // 'D'
-        5'd13:   track_ch = playing_vid ? 8'h20 : hexch({2'd0, dbg_state[5:4]});
-        5'd14:   track_ch = playing_vid ? 8'h20 : hexch(dbg_state[3:0]);
-        5'd16:   track_ch = playing_vid ? 8'h20 : 8'h45;            // 'E'
-        5'd17:   track_ch = playing_vid ? 8'h20 : hexch({1'b0, dbg_err});
-        5'd18:   track_ch = playing_vid ? 8'h20 : 8'h52;            // 'R'
-        5'd19:   track_ch = playing_vid ? 8'h20 : hexch(dbg_retry[3:0]);
         // elapsed MM:SS / total MM:SS, right side
         5'd20:   track_ch = {4'h3, el_m_t};
         5'd21:   track_ch = {4'h3, el_m_o};
@@ -1506,10 +1498,8 @@ always @(*) begin
 end
 
     wire [7:0]  font_ch = browse_vid ? (browse_area ? name_ch : 8'h20)
-                        : line_title ? (playing_vid ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
-                                                    : title_dbg_ch)
-                        : line_game  ? (playing_vid ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
-                                                    : path_ch)
+                        : line_title ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
+                        : line_game  ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
                         : line_hint  ? hint_ch
                         : line_hint2 ? hint2_ch
                         : track_ch;
@@ -1645,8 +1635,6 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
-                    else if ((line_track || line_game || line_title) && text_px)
-                        vidout_rgb <= 24'h909090;   // debug: D/E/R + size/count + path
                 end else begin
                     if (!playing_vid && visible_x >= 'd498 && visible_x < 'd506 &&
                         visible_y >= 'd4 && visible_y < 'd12)
