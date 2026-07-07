@@ -1210,6 +1210,9 @@ assign video_hs = vidout_hs;
     reg [4:0]   dbg_state;
     reg [2:0]   dbg_err;
     reg [5:0]   dbg_retry;
+    reg [31:0]  dbg_size;
+    reg [9:0]   dbg_count;
+    reg         dbg_idx;
     reg [255:0] path_vid;
     integer     pk;
 
@@ -1317,7 +1320,32 @@ end
     wire [7:0]  path_raw = path_vid[{la_ci[4:2], ~la_ci[1:0], 3'b000} +: 8];
     wire [7:0]  path_ch  = (path_raw < 8'h20 || path_raw > 8'h7E) ? 8'h2E : path_raw;
 
-    wire [7:0]  font_ch = line_title ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
+    // title line when stopped: "SZ<size8> N<count3> I<idx1>" diagnostic
+    reg [7:0]  title_dbg_ch;
+always @(*) begin
+    case (la_ci)
+        5'd0:    title_dbg_ch = 8'h53;   // S
+        5'd1:    title_dbg_ch = 8'h5A;   // Z
+        5'd2:    title_dbg_ch = hexch(dbg_size[31:28]);
+        5'd3:    title_dbg_ch = hexch(dbg_size[27:24]);
+        5'd4:    title_dbg_ch = hexch(dbg_size[23:20]);
+        5'd5:    title_dbg_ch = hexch(dbg_size[19:16]);
+        5'd6:    title_dbg_ch = hexch(dbg_size[15:12]);
+        5'd7:    title_dbg_ch = hexch(dbg_size[11:8]);
+        5'd8:    title_dbg_ch = hexch(dbg_size[7:4]);
+        5'd9:    title_dbg_ch = hexch(dbg_size[3:0]);
+        5'd11:   title_dbg_ch = 8'h4E;   // N
+        5'd12:   title_dbg_ch = hexch({2'd0, dbg_count[9:8]});
+        5'd13:   title_dbg_ch = hexch(dbg_count[7:4]);
+        5'd14:   title_dbg_ch = hexch(dbg_count[3:0]);
+        5'd16:   title_dbg_ch = 8'h49;   // I
+        5'd17:   title_dbg_ch = hexch({3'd0, dbg_idx});
+        default: title_dbg_ch = 8'h20;
+    endcase
+end
+
+    wire [7:0]  font_ch = line_title ? (playing_vid ? title_vid[{4'd0, la_ci, 3'd0} +: 8]
+                                                    : title_dbg_ch)
                         : line_game  ? (playing_vid ? title_vid[{4'd1, la_ci, 3'd0} +: 8]
                                                     : path_ch)
                         : line_hint  ? hint_ch
@@ -1403,6 +1431,9 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             dbg_state <= tkstate;
             dbg_err   <= target_dataslot_err;
             dbg_retry <= retry_cnt;
+            dbg_size  <= pak_size;
+            dbg_count <= song_count;
+            dbg_idx   <= pak_indexed;
             for (pk = 0; pk < 8; pk = pk + 1)
                 path_vid[pk*32 +: 32] <= fbuf[pk];
         end
@@ -1433,8 +1464,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
                     if (visible_x == 0 || visible_x == VID_H_ACTIVE-1 ||
                         visible_y == 0 || visible_y == VID_V_ACTIVE-1)
                         vidout_rgb <= border_rgb;
-                    else if ((line_track || line_game) && text_px)
-                        vidout_rgb <= 24'h909090;   // debug readout + path
+                    else if ((line_track || line_game || line_title) && text_px)
+                        vidout_rgb <= 24'h909090;   // debug: D/E/R + size/count + path
                 end else begin
                     if (!playing_vid && visible_x >= 'd498 && visible_x < 'd506 &&
                         visible_y >= 'd4 && visible_y < 'd12)
