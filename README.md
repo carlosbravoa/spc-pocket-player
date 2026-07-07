@@ -29,8 +29,9 @@ spc_apu.vhd ── loader FSM routes the file:
 SMP (SPC700) ◄──► DSP ◄──► ARAM BRAM ──► AUDIO_L/R @32kHz ──► sound_i2s (48kHz I2S)
 ```
 
-Video output is 512×240 at 60.09 Hz (SNES-like timing, 10.738635 MHz dot
-clock): track counter, ID666 song/game title, and stereo VU meters.
+Video output is full-screen 512×480 at 60.09 Hz (21.477 MHz dot clock,
+10:9 to fill the Pocket display): track counter, ID666 song/game title,
+8 per-voice envelope bars, and stereo VU meters.
 
 ## Albums (.spcpak)
 
@@ -50,13 +51,23 @@ album per folder) and never touch the file browser again:
 ./tools/pack_all.sh ~/spc /media/sd/Assets/spc/common --library
 ```
 
-L1/R1 jump between albums. Packs made by older tool versions (no index)
-still play as a single album.
+L1/R1 jump between albums; **Select** opens an on-screen album browser
+(d-pad to scroll, left/right to scroll a long name, A to jump).
 
-**Controls**: dpad right = next track, dpad left = previous track,
-A = restart track, Y = shuffle on/off ("S" indicator on screen; next/auto
-picks a random other track while enabled), L1/R1 = previous/next album
-(indexed packs).
+**Controls**:
+
+| Button | Action |
+|---|---|
+| D-pad ◀ / ▶ | previous / next track |
+| A | restart current track |
+| Y | shuffle on/off (`S` indicator) |
+| X | scope: whole pack / current album (`A` indicator) |
+| L1 / R1 | previous / next album |
+| Select | open/close the album browser (d-pad scroll, ◀▶ scroll long names, A jumps) |
+
+Shuffle is contextual to the scope (whole pack, or within the current
+album). Auto-advance uses ID666 length tags, with a 2-second fade-out; a
+song that goes silent for 4 seconds also advances.
 
 **Display**: track number, shuffle indicator, elapsed/total time (MM:SS),
 song + game title, 8 per-voice envelope bars (one colored column per DSP
