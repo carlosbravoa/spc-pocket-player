@@ -31,17 +31,22 @@ ap.add_argument("--no-index", action="store_true",
 args = ap.parse_args()
 
 
+NAME_STRIDE = 64   # bytes per album name (63 chars + null); allows h-scroll
+
 def build_index(albums):
-    """Index entry (0x10200 bytes): magic, counts, album start table, names."""
+    """Index entry (0x10200 bytes): magic, counts, album start table, names.
+    Layout: magic@0, u16 tracks@8, u16 albums@0xA, u16 start[a]@0x10,
+    char name[a][64]@0x210 (null-terminated)."""
     idx = bytearray(ENTRY)
     idx[0:8] = b"SPCPAKIX"
     total = sum(n for n, _ in albums)
     struct.pack_into("<HH", idx, 0x8, total, len(albums))
     start = 0
-    for a, (ntracks, name) in enumerate(albums[:256]):
+    for a, (ntracks, name) in enumerate(albums[:1023]):
         struct.pack_into("<H", idx, 0x10 + a * 2, start)
-        nm = name.encode("latin1", "replace")[:32]
-        idx[0x210 + a * 32:0x210 + a * 32 + len(nm)] = nm
+        nm = name.encode("latin1", "replace")[:NAME_STRIDE - 1]
+        base = 0x210 + a * NAME_STRIDE
+        idx[base:base + len(nm)] = nm
         start += ntracks
     return idx
 

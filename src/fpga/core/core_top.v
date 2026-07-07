@@ -551,6 +551,7 @@ synch_3 #(.WIDTH(32)) s_cont(cont1_key, cont1_key_s74, clk_74a);
     reg             browse_mode = 0;
     reg     [7:0]   browse_cursor = 0;
     reg     [7:0]   browse_top = 0;     // first visible album row
+    reg     [5:0]   browse_hscroll = 0; // horizontal scroll of the cursor row
     reg             album_goto = 0;     // 1 = jump to browse_cursor, 0 = step
 
     reg             allcomplete_1 = 0;
@@ -650,13 +651,13 @@ always @(posedge clk_74a) begin
     if (idx_bwr && bridge_addr[16:0] >= 17'h10 && bridge_addr[16:0] < 17'h210)
         astart_ram[bridge_addr[9:2] - 8'd4] <= bridge_wr_data;
     astart_q <= astart_ram[alb_scan[8:1]];
-    // album names: 256 x 32 bytes at index offset 0x210-0x2210 (2048 words)
-    if (idx_bwr && bridge_addr[16:0] >= 17'h210 && bridge_addr[16:0] < 17'h2210)
+    // album names: 64 bytes each at index offset 0x210-0x4210 (4096 words)
+    if (idx_bwr && bridge_addr[16:0] >= 17'h210 && bridge_addr[16:0] < 17'h4210)
         name_ram[bridge_addr[16:2] - 15'h84] <= bridge_wr_data;
 end
 
     // album name table, written above (clk_74a), read by the video domain
-    reg     [31:0]  name_ram [0:2047];
+    reg     [31:0]  name_ram [0:4095];
     reg     [31:0]  name_q;
 
     // album_start[a]: even entries in the word's high half, odd in the low,
@@ -695,10 +696,16 @@ always @(posedge clk_74a) begin
         browse_mode <= ~browse_mode;
 
     if (browse_mode) begin
-        if (btn_up && browse_cursor != 0)
+        if (btn_up && browse_cursor != 0) begin
             browse_cursor <= browse_cursor - 1'b1;
-        else if (btn_down && browse_cursor + 1'b1 < idx_albums[7:0])
+            browse_hscroll <= 0;            // reset scroll when the row changes
+        end else if (btn_down && browse_cursor + 1'b1 < idx_albums[7:0]) begin
             browse_cursor <= browse_cursor + 1'b1;
+            browse_hscroll <= 0;
+        end else if (btn_prev && browse_hscroll != 0)      // dpad left
+            browse_hscroll <= browse_hscroll - 1'b1;
+        else if (btn_next && browse_hscroll < 6'd32)       // dpad right
+            browse_hscroll <= browse_hscroll + 1'b1;
         // keep the cursor inside the visible window (BROWSE_ROWS rows)
         if (browse_cursor < browse_top)
             browse_top <= browse_cursor;
@@ -1339,26 +1346,30 @@ assign video_hs = vidout_hs;
     reg [7:0]   cursor_vid;
     reg [7:0]   top_vid;
     reg [8:0]   nalb_vid;
+    reg [5:0]   hscroll_vid;
 
     function [7:0] hexch(input [3:0] d);
         hexch = (d < 10) ? {4'h3, d} : (8'h37 + {4'd0, d});
     endfunction
 
-    // album browser: geometry and name-RAM read (video clock)
-    localparam  BROWSE_Y0 = 'd24;       // first row top
+    // album browser: geometry and name-RAM read (video clock).
+    // BROWSE_Y0 must be a multiple of 16 so the shared font row index
+    // (visible_y[3:1]) lines up with each 16px browser row.
+    localparam  BROWSE_Y0 = 'd32;       // first row top (16-aligned)
     wire [8:0]  browse_row  = (visible_y - BROWSE_Y0) >> 4;         // 16px/row
     wire [7:0]  browse_alb  = top_vid + browse_row[7:0];
     wire        browse_area = browse_vid && visible_y >= BROWSE_Y0 &&
                               browse_row < BROWSE_ROWS && browse_alb < nalb_vid;
-    // read name byte for the char one ahead (registered BRAM), MSB-first
-    wire [7:0]  name_alb  = top_vid + browse_row[7:0];
-    wire [10:0] name_radr = {name_alb[7:0], la_ci[4:2]};
-    reg  [2:0]  name_bsel;
+    // 64-byte names; the highlighted row scrolls horizontally. Read the char
+    // one ahead (registered BRAM), MSB-first within each 32-bit word.
+    wire [5:0]  name_col = la_ci + ((browse_alb == cursor_vid) ? hscroll_vid : 6'd0);
+    wire [11:0] name_radr = {browse_alb[7:0], name_col[5:2]};
+    reg  [1:0]  name_bsel;
 always @(posedge clk_video_10_74) begin
     name_q    <= name_ram[name_radr];
-    name_bsel <= {la_ci[1:0], 1'b0};
+    name_bsel <= name_col[1:0];
 end
-    wire [7:0]  name_raw = name_q[(3 - name_bsel[2:1])*8 +: 8];
+    wire [7:0]  name_raw = name_q[(3 - name_bsel)*8 +: 8];
     wire [7:0]  name_ch  = (name_raw < 8'h20 || name_raw > 8'h7E) ? 8'h20 : name_raw;
 
     reg [23:0]  border_rgb;
@@ -1586,6 +1597,7 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             cursor_vid <= browse_cursor;
             top_vid    <= browse_top;
             nalb_vid   <= idx_albums[8:0];
+            hscroll_vid <= browse_hscroll;
             for (vj = 0; vj < 8; vj = vj + 1)
                 venv_vid[vj] <= venv_peak[vj][10:5];
             dbg_state <= tkstate;
