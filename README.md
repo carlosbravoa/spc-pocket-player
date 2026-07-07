@@ -137,6 +137,11 @@ two different buffer addresses; no shipping core uses these commands, and
 the PC Engine CD core — the other user of deferload — simply displays an
 error on file changes).
 
+A detailed write-up of the symptoms, everything tried (including the
+`getfile`/`openfile` dead-ends), and open questions is in
+[`docs/mid-session-reload-investigation.md`](docs/mid-session-reload-investigation.md)
+— corrections and a working mid-session re-open sequence are very welcome.
+
 The practical answers, in order of preference:
 
 1. **Pack your whole collection into one indexed library pack**
