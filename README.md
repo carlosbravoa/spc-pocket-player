@@ -1,156 +1,111 @@
 # SPC Pocket Player
 
-An [openFPGA](https://www.analogue.co/developer) core for the **Analogue Pocket**
-that plays SNES/Super Famicom **.spc** music files on a real hardware
-implementation of the S-SMP (SPC700) + S-DSP audio subsystem, extracted from
-the [MiSTer SNES core](https://github.com/MiSTer-devel/SNES_MiSTer) by srg320
-(via [agg23's openFPGA port](https://github.com/agg23/openfpga-SNES)).
+Play SNES / Super Famicom **`.spc`** music files on the **Analogue Pocket** —
+on a real hardware implementation of the S-SMP (SPC700) + S-DSP, not a
+software emulator. The SPC700 actually runs the game's music driver and the
+S-DSP renders the voices at the original 32 kHz.
 
-Nothing is emulated at the software level: the SPC700 CPU executes the music
-driver from the .spc dump and the S-DSP renders the voices at the original
-32 kHz, clocked at the authentic 21.47727 MHz master clock.
+Drop in a single `.spc` and it plays. For a real jukebox — album browsing,
+track names, auto-advance, shuffle — bundle your songs into a **`.spcpak`**
+(see below); it's the recommended way to use the core.
 
-## Architecture
+## Quick start
 
-```
-.spc file (SD card)
-   │  APF bridge (data slot 0 @ 0x10000000)
-   ▼
-data_loader (CDC 74.25 MHz → 21.47727 MHz, 16-bit LE words)
-   ▼
-spc_apu.vhd ── loader FSM routes the file:
-   ├─ header 0x25-0x2B ───────► SPC700 registers (PC/A/X/Y/PSW/SP) via IO port
-   ├─ 64KB ARAM image ────────► dual-port BRAM (also captures $F0-$FF page)
-   ├─ DSP regs @0x10100 ──────► DSP register file via IO port (0x100-0x17F)
-   ├─ extra RAM @0x101C0 ─────► ARAM $FFC0-$FFFF
-   └─ after load: replays $F0-$FF page → IO 0x2F0-0x2FE
-      (SMP control/timers/DSP address latch), then releases APU reset
-   ▼
-SMP (SPC700) ◄──► DSP ◄──► ARAM BRAM ──► AUDIO_L/R @32kHz ──► sound_i2s (48kHz I2S)
-```
+1. Grab the [latest release](https://github.com/carlosbravoa/spc-pocket-player/releases)
+   and unzip it onto your SD card root (or build it yourself — see below).
+2. Put your `.spc` / `.spcpak` files in `/Assets/spc/common/`.
+3. Launch **SPC Player**, pick a file.
 
-Video output is full-screen 512×480 at 60.09 Hz (21.477 MHz dot clock,
-10:9 to fill the Pocket display): track counter, ID666 song/game title,
-8 per-voice envelope bars, and stereo VU meters.
+You can pick a different file from the menu any time while it's running.
 
-## Albums (.spcpak)
+## Song packs (recommended)
 
-The data slot is `deferload`: the core pulls one 0x10200-byte song at a time
-with `target_dataslot_read`, so a single file can hold a whole soundtrack.
+A raw `.spc` is a single song with no track list — it just loops forever.
+A `.spcpak` bundles many songs, keeps their names and lengths, and unlocks
+auto-advance, shuffle, and the track/album browser.
 
 ```sh
+# one album from a folder of .spc files
 python3 tools/make_spcpak.py ~/spc/chrono-trigger/ -o "Chrono Trigger.spcpak"
-```
 
-A plain `.spc` is just a 1-song pack — both load the same way.
-
-**Library packs**: pack your entire collection into one indexed file (one
-album per folder) and never touch the file browser again:
-
-```sh
+# your whole collection into ONE file — one album per subfolder
 ./tools/pack_all.sh ~/spc /media/sd/Assets/spc/common --library
 ```
 
-L1/R1 jump between albums; **Select** opens an on-screen album browser
-(d-pad to scroll, left/right to scroll a long name, A to jump).
+With a library pack you pick it once and never touch the file browser again:
+L1/R1 jump albums, **Select** opens a scrollable album list.
 
-**Controls**:
+## Controls
 
 | Button | Action |
 |---|---|
 | D-pad ◀ / ▶ | previous / next track |
-| A | restart current track |
-| Y | shuffle on/off (`S` indicator) |
-| X | scope: whole pack / current album (`A` indicator) |
+| A | restart track |
+| Y | shuffle on/off |
+| X | scope: whole pack ↔ current album |
 | L1 / R1 | previous / next album |
-| Select | open/close the album browser (d-pad scroll, ◀▶ scroll long names, A jumps) |
+| Select | album browser (d-pad scroll, ◀▶ scroll long names, A to jump) |
 
-Shuffle is contextual to the scope (whole pack, or within the current
-album). Auto-advance uses ID666 length tags, with a 2-second fade-out; a
-song that goes silent for 4 seconds also advances.
+Shuffle applies within the current scope. Auto-advance uses each song's
+length tag with a 2-second fade-out (and any song silent for 4 s also
+advances). Untagged songs loop.
 
-**Display**: track number, shuffle indicator, elapsed/total time (MM:SS),
-song + game title, 8 per-voice envelope bars (one colored column per DSP
-voice), and stereo VU strips.
+## On screen
 
-**Fade-out**: tagged songs fade over their final 2 seconds before
-advancing.
+Full-screen 512×480: track counter, song + game title, 8 per-voice envelope
+bars, stereo VU meters, and elapsed / total time. A colored corner square
+signals status while stopped (red = pick a file, orange = loading,
+magenta = read error).
 
-**Auto-advance**: the pack tool reads each song's ID666 length+fade tag
-(or `--default-length`, 180s, when untagged; 0 = loop forever) and stamps it
-into the entry; the core moves to the next track when the time is up. Plain
-`.spc` files loaded directly loop forever.
+## Notes & limitations
 
-**Status indicators**: a full border is shown only before the first song
-plays (red = waiting for a file, orange = loading, magenta = read failed
-after ~10 automatic retries). After that, a small square in the top-right
-corner shows the same colors whenever playback is stopped; track changes
-keep the normal UI on screen.
+- Extended ID666 (xid6) tags are ignored; lengths come from the standard
+  header tags, or `--default-length` at pack time.
+- DSP audio is sample-and-held from 32 kHz to the Pocket's 48 kHz I2S (same
+  as the SNES core).
+- Notes already sounding at dump time restart from the sample start — a
+  limitation of the `.spc` format shared by all SPC players.
+- Packs made before the index/length features still play, as one album
+  without auto-advance.
+- Mid-session file changes work only because the data slot's `parameters` is
+  `0x09` (no bit 8) — see
+  [`docs/mid-session-reload-investigation.md`](docs/mid-session-reload-investigation.md)
+  for that rabbit hole.
 
-**File changes**: after picking a new file the core waits ~0.5s before
-reading it (APF needs time to swap files), and the command channel has a
-watchdog so a misbehaving transfer can never require a core reboot.
+## Building & simulation
 
-**Echo-buffer hygiene**: many SPC dumps carry garbage in the echo buffer
-region, audible as a noise burst with an echo tail at song start. The
-loader zeroes the echo region on every load (only when the song has echo
-writes enabled, so repurposed RAM is never touched).
-
-## Building
-
-Requires Quartus Prime (Lite) with Cyclone V support.
+Needs Quartus Prime (Lite) with Cyclone V support.
 
 ```sh
-./build.sh          # compile + bit-reverse + assemble SD tree in out/
+./build.sh   # compile → bit-reverse RBF → assemble the SD tree in out/
 ```
 
-Copy the contents of `out/` onto the Pocket's SD card root, then put your
-`.spc`/`.spcpak` files in `/Assets/spc/common/`. Launch the "SPC Player"
-core and pick a file.
-
-## Simulation
-
-The APU + loader are fully simulatable with GHDL (no license needed):
+The APU + loader simulate under GHDL (no license needed) — a testbench
+streams a real `.spc` through the same loader the Pocket uses and dumps the
+32 kHz audio to a WAV:
 
 ```sh
-python3 tools/make_test_spc.py sim/test_tone.spc   # deterministic 1kHz tone
-python3 tools/make_arp_spc.py  sim/test_arp.spc    # timers+ADSR+echo test
-./sim/run_sim.sh test_tone.spc 100                 # renders 100ms of audio
-python3 tools/raw_to_wav.py sim/work/audio_out.raw # convert + analyze
+python3 tools/make_test_spc.py sim/test_tone.spc   # deterministic 1 kHz tone
+./sim/run_sim.sh test_tone.spc 100                 # render 100 ms of audio
+python3 tools/raw_to_wav.py sim/work/audio_out.raw
 ```
 
-The testbench streams the real .spc file through the same loader interface
-the Pocket uses and dumps every 32 kHz sample pair to `sim/work/audio_out.raw`.
+<details>
+<summary>How it works</summary>
 
-## Changing files mid-session
+The SNES APU (`SMP.vhd` + `DSP.vhd` + `SPC700/`, from the MiSTer SNES core)
+is wrapped in `spc_apu.vhd` with a 64 KB BRAM audio-RAM and a loader FSM. The
+`.spc` file arrives over the APF bridge; the loader writes the ARAM image,
+routes the header's SPC700 registers and the DSP registers through the MiSTer
+"SPC mode" IO port, replays the `$F0–$FF` page, then releases the APU. Audio
+comes out at 32 kHz and is resampled to 48 kHz I2S. Packs are read one song
+at a time on demand from a `deferload` slot via `target_dataslot_read`.
 
-You can pick a new `.spc`/`.spcpak` from the menu while the core is running
-and it loads the new file — no relaunch needed. (This took some doing: it
-only works because the data slot's `parameters` is `0x09` and specifically
-does **not** set bit 8 "reload bitstream"; with that bit set the Pocket
-silently refuses to read the re-picked file. The full story is in
-[`docs/mid-session-reload-investigation.md`](docs/mid-session-reload-investigation.md).)
-
-For a whole collection, a single indexed **library pack**
-(`pack_all.sh <root> --library`) is still the nicest experience — pick it
-once and browse albums with L1/R1 and Select, with shuffle and auto-advance
-across everything.
-
-## Limitations
-
-- Extended ID666 (xid6) tags are ignored; play lengths come from the
-  standard header tags (or `--default-length` at pack time).
-- Audio is sample-and-held from the DSP's native 32kHz to the Pocket's
-  48kHz I2S (same approach as the SNES core).
-- The DSP register snapshot restores what the .spc format captures; voices
-  keyed on at dump time restart from their sample beginnings (a format
-  limitation shared by all SPC players).
-- Packs created by tool versions before the index/length features still
-  play, as a single album without auto-advance.
+</details>
 
 ## Licenses
 
 - SNES APU RTL (`src/fpga/core/spc/`): GPL-2.0+ (srg320, MiSTer project)
 - `data_loader.sv`, `sound_i2s.sv`, `sync_fifo.sv`: MIT (Adam Gastineau)
-- APF framework files (`src/fpga/apf/`): Analogue core template
-- Everything else in this repo: GPL-3.0
+- APF framework (`src/fpga/apf/`): Analogue core template
+- Everything else here: GPL-3.0
