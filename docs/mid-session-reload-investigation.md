@@ -1,7 +1,30 @@
-# Problem statement: mid-session file re-pick on a `deferload` data slot
+# Mid-session file re-pick on a `deferload` data slot — SOLVED
 
-**Status:** Open / unsolved. Worked around (see §7). Written for future investigation
-and to solicit input from the openFPGA developer community.
+**Status: SOLVED.** The cause was a single wrong bit in the slot's `data.json`
+`parameters`. **Do not set bit 8 (`0x100`, "reload bitstream before core restart")
+on a `deferload` slot you want to re-pick live.** With that bit set, the Pocket host
+silently refuses to service `target_dataslot_read` after a menu re-pick (no ack, no
+done). Remove it and mid-session re-pick works with plain `target_dataslot_read` —
+exactly like the Amiga (floppy) and PC Engine CD (disc) cores.
+
+## TL;DR fix
+
+- Our slot had `"parameters": "0x109"` (bits 0 user-reloadable, 3 read-only, **8
+  reload-bitstream**). Changing it to **`"0x09"`** (bits 0 + 3, matching the PCE-CD
+  cue/bin slots) fixed it completely. No RTL change.
+- Live-swap reference configs: Amiga floppy `parameters: 1`; PCE-CD cue/bin
+  `0x09`/`0x08`. None set bit 8. Bit 8 was the one bit we had that they didn't.
+- The re-pick handling itself is trivial: on `dataslot_update` (0x008A), re-read the
+  new size from the data table and re-issue the same plain `target_dataslot_read`.
+  **No `getfile`/`openfile`, no re-arm, no restart.** (A failed `openfile` — see §5 —
+  actively corrupts the slot handle; we had added it as a "fix" and it was making
+  things worse. Deleted.)
+
+The original investigation notes are kept below for the record.
+
+---
+
+**Original status (now resolved):** Open / unsolved.
 
 **Applies to:** Analogue Pocket openFPGA cores that use a `deferload` data slot and
 `target_dataslot_read` to stream file contents on demand (as opposed to letting APF

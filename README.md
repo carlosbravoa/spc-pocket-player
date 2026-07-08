@@ -122,36 +122,21 @@ python3 tools/raw_to_wav.py sim/work/audio_out.raw # convert + analyze
 The testbench streams the real .spc file through the same loader interface
 the Pocket uses and dumps every 32 kHz sample pair to `sim/work/audio_out.raw`.
 
-## Current limitations
+## Changing files mid-session
 
-**Changing files mid-session does not work — pack a library instead.**
-This core streams songs on demand from a `deferload` data slot using APF's
-`target_dataslot_read`. That works perfectly for the file selected at core
-launch, but the Pocket firmware does not properly support *replacing* the
-file afterwards: after picking a new file from the menu, the slot's size is
-updated but every subsequent read silently never completes (tested across
-firmware versions). The documented remedies don't work either — the
-`getfile` (0x0190) and `openfile` (0x0192) target commands complete with
-success codes but never actually deliver the filename struct (verified at
-two different buffer addresses; no shipping core uses these commands, and
-the PC Engine CD core — the other user of deferload — simply displays an
-error on file changes).
+You can pick a new `.spc`/`.spcpak` from the menu while the core is running
+and it loads the new file — no relaunch needed. (This took some doing: it
+only works because the data slot's `parameters` is `0x09` and specifically
+does **not** set bit 8 "reload bitstream"; with that bit set the Pocket
+silently refuses to read the re-picked file. The full story is in
+[`docs/mid-session-reload-investigation.md`](docs/mid-session-reload-investigation.md).)
 
-A detailed write-up of the symptoms, everything tried (including the
-`getfile`/`openfile` dead-ends), and open questions is in
-[`docs/mid-session-reload-investigation.md`](docs/mid-session-reload-investigation.md)
-— corrections and a working mid-session re-open sequence are very welcome.
+For a whole collection, a single indexed **library pack**
+(`pack_all.sh <root> --library`) is still the nicest experience — pick it
+once and browse albums with L1/R1 and Select, with shuffle and auto-advance
+across everything.
 
-The practical answers, in order of preference:
-
-1. **Pack your whole collection into one indexed library pack**
-   (`pack_all.sh <root> --library`) and never touch the file browser again:
-   L1/R1 jump between albums, shuffle and auto-advance work across
-   everything.
-2. To switch to a different file, **quit and relaunch the core** (a few
-   seconds) — the launch-time load path is fully reliable.
-
-Other limitations:
+## Limitations
 
 - Extended ID666 (xid6) tags are ignored; play lengths come from the
   standard header tags (or `--default-length` at pack time).

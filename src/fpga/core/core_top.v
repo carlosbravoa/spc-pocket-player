@@ -671,6 +671,9 @@ end
     // avoids reading up to the exact end-of-file)
     reg     [23:0]  retry_timer = 0;
     reg     [5:0]   retry_cnt = 0;
+    // diagnostics: did the host EVER ack / complete a read this load attempt?
+    reg             saw_ack = 0;
+    reg             saw_done = 0;
     reg             short_read = 0;     // fallback: skip the extra-RAM tail
     reg             load_error = 0;     // sticky: retries exhausted
 
@@ -689,6 +692,10 @@ always @(posedge clk_74a) begin
     reset_n_1      <= reset_n;
 
     lfsr <= lfsr[0] ? (lfsr >> 1) ^ 16'hB400 : lfsr >> 1;
+
+    // latch whether the host ever responded to a read during this attempt
+    if (target_dataslot_ack)  saw_ack  <= 1;
+    if (target_dataslot_done) saw_done <= 1;
 
     // browse mode: Select opens/closes the album list; up/down move the
     // cursor; A jumps to the highlighted album (handled in the trigger block)
@@ -1084,12 +1091,9 @@ always @(posedge clk_74a) begin
         pending_load    <= 1;
         pending_recount <= 1;
         pending_album   <= 0;
-        // only a mid-session file change needs the fresh-handle reopen;
-        // boot (including its deferload update notification, when have_pak
-        // is still 0) uses the plain proven path
-        pending_reopen  <= have_pak &&
-                           ((dataslot_update && dataslot_update_id == 16'h0) ||
-                            (dataslot_requestwrite && dataslot_requestwrite_id == 16'h0));
+        pending_reopen  <= 0;
+        saw_ack         <= 0;   // reset the response diagnostics per attempt
+        saw_done        <= 0;
         pending_random  <= 0;
         pending_index   <= 0;
         retry_cnt       <= 0;
@@ -1338,6 +1342,8 @@ assign video_hs = vidout_hs;
     reg [2:0]   dbg_err;
     reg [5:0]   dbg_retry;
     reg [31:0]  dbg_size;
+    reg         dbg_ack;
+    reg         dbg_done;
     reg [11:0]  dbg_count;
     reg         dbg_idx;
     reg [255:0] path_vid;
@@ -1452,18 +1458,18 @@ always @(*) begin
         5'd7:    track_ch = {4'h3, c_d0};
         5'd9:    track_ch = scope_vid   ? 8'h41 : 8'h20;    // 'A' = album scope
         5'd10:   track_ch = shuffle_vid ? 8'h53 : 8'h20;    // 'S' = shuffle
-        // elapsed MM:SS / total MM:SS, right side
-        5'd20:   track_ch = {4'h3, el_m_t};
-        5'd21:   track_ch = {4'h3, el_m_o};
-        5'd22:   track_ch = 8'h3A;          // ':'
-        5'd23:   track_ch = {4'h3, el_s_t};
-        5'd24:   track_ch = {4'h3, el_s_o};
-        5'd25:   track_ch = has_len ? 8'h2F : 8'h20;
-        5'd26:   track_ch = has_len ? {4'h3, ln_m_t} : 8'h20;
-        5'd27:   track_ch = has_len ? {4'h3, ln_m_o} : 8'h20;
-        5'd28:   track_ch = has_len ? 8'h3A : 8'h20;
-        5'd29:   track_ch = has_len ? {4'h3, ln_s_t} : 8'h20;
-        5'd30:   track_ch = has_len ? {4'h3, ln_s_o} : 8'h20;
+        // elapsed MM:SS / total MM:SS (only while playing)
+        5'd20:   track_ch = playing_vid ? {4'h3, el_m_t} : 8'h20;
+        5'd21:   track_ch = playing_vid ? {4'h3, el_m_o} : 8'h20;
+        5'd22:   track_ch = playing_vid ? 8'h3A : 8'h20;
+        5'd23:   track_ch = playing_vid ? {4'h3, el_s_t} : 8'h20;
+        5'd24:   track_ch = playing_vid ? {4'h3, el_s_o} : 8'h20;
+        5'd25:   track_ch = (playing_vid && has_len) ? 8'h2F : 8'h20;
+        5'd26:   track_ch = (playing_vid && has_len) ? {4'h3, ln_m_t} : 8'h20;
+        5'd27:   track_ch = (playing_vid && has_len) ? {4'h3, ln_m_o} : 8'h20;
+        5'd28:   track_ch = (playing_vid && has_len) ? 8'h3A : 8'h20;
+        5'd29:   track_ch = (playing_vid && has_len) ? {4'h3, ln_s_t} : 8'h20;
+        5'd30:   track_ch = (playing_vid && has_len) ? {4'h3, ln_s_o} : 8'h20;
         default: track_ch = 8'h20;
     endcase
 end
@@ -1595,6 +1601,8 @@ always @(posedge clk_video_10_74 or negedge reset_n) begin
             dbg_state <= tkstate;
             dbg_err   <= target_dataslot_err;
             dbg_retry <= retry_cnt;
+            dbg_ack   <= saw_ack;
+            dbg_done  <= saw_done;
             dbg_size  <= pak_size;
             dbg_count <= song_count;
             dbg_idx   <= pak_indexed;

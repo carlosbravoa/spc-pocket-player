@@ -6,7 +6,7 @@
         "name": "SPC/Album",
         "id": 0,
         "required": true,
-        "parameters": "0x109",
+        "parameters": "0x09",
         "deferload": true,
         "extensions": ["spc", "spcpak"],
         "size_maximum": "0x8000000",
