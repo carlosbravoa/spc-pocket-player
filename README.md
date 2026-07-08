@@ -5,6 +5,8 @@ on a real hardware implementation of the S-SMP (SPC700) + S-DSP, not a
 software emulator. The SPC700 actually runs the game's music driver and the
 S-DSP renders the voices at the original 32 kHz.
 
+![SPC Pocket Player playing "Spark Mandrill" from Mega Man X, with per-voice envelope bars](docs/screenshot.png)
+
 Drop in a single `.spc` and it plays. For a real jukebox — album browsing,
 track names, auto-advance, shuffle — bundle your songs into a **`.spcpak`**
 (see below); it's the recommended way to use the core.
