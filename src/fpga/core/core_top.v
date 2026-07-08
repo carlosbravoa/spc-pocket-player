@@ -744,14 +744,14 @@ always @(posedge clk_74a) begin
         TK_DEFER: begin
             defer_timer <= defer_timer + 1'b1;
             if (&defer_timer) begin
-                // fresh-handle reopen only after a file change or a failed
-                // attempt - the plain boot path must stay untouched
-                if (pending_reopen) begin
-                    pending_reopen <= 0;
-                    tkstate <= TK_GETFILE;
-                end else begin
-                    tkstate <= TK_SIZE0;
-                end
+                // A mid-session file re-pick is handled EXACTLY like boot:
+                // re-read the new size and re-issue the plain target read.
+                // This mirrors the proven live-swap cores (Amiga floppy,
+                // PCE-CD disc). Do NOT call getfile/openfile here - a failed
+                // openfile corrupts the slot handle and wedges the reads
+                // (that was the actual cause of "new file won't load").
+                pending_reopen <= 0;
+                tkstate <= TK_SIZE0;
             end
         end
 

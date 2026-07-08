@@ -11,3 +11,5 @@ sim/*.wav
 out/
 pkg/Cores/*/bitstream.rbf_r
 *.bak
+pcecd
+amiga
